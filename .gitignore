@@ -1,0 +1,15 @@
+# 配置文件
+.env
+guet_drcom.config.json
+guet_drcom.log
+guet_drcom_hidden.vbs
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# Claude 项目配置（不开源）
+.claude/
+
+# 日志
+*.log
