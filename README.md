@@ -123,14 +123,13 @@ powershell -ExecutionPolicy Bypass -File .\guet_drcom.ps1 disable
 
 ---
 
-## 支持
+## 支持作者
 
-如果你觉得这个工具对你有帮助，欢迎打赏支持！
+如果这个工具帮到了你，欢迎给项目点个 ⭐ Star，或请作者喝杯咖啡 ☕
 
-<img src="收款码.jpg" width="200" alt="收款码" />
+<img src="qrcode.jpg" width="200" alt="二维码" />
 
-**感谢支持！**  
-本工具免费开源，免费使用，如有帮助请支持作者！
+本工具免费开源，你的支持是我持续维护的动力。
 
 ---
 
