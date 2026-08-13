@@ -183,6 +183,25 @@ $env:DRY_RUN = '1'; .\guet_drcom.ps1 login
 
 ---
 
+## 运行示例
+
+以下为脚本运行的终端输出截图（macOS 终端风格）。
+
+> 说明：截图均以 `DRY_RUN=1`（干跑）模式生成，仅展示交互与输出格式，**不真实发送任何认证请求**；网络信息、账号均为模拟值。实际运行时去掉 `DRY_RUN` 即可正常登录。
+
+<table>
+<tr>
+<td><b><code>./guet_drcom.sh help</code></b><br>查看帮助与当前状态<br><img src="docs/screenshot-help.png" width="100%" alt="help 运行截图" /></td>
+<td><b><code>DRY_RUN=1 ./guet_drcom.sh login</code></b><br>登录流程（干跑，不发请求）<br><img src="docs/screenshot-login.png" width="100%" alt="login 运行截图" /></td>
+</tr>
+<tr>
+<td><b><code>DRY_RUN=1 ./guet_drcom.sh logout</code></b><br>单独注销（干跑，不发请求）<br><img src="docs/screenshot-logout.png" width="100%" alt="logout 运行截图" /></td>
+<td><b><code>./guet_drcom.sh auto</code></b><br>启用每分钟自动检测与重连<br><img src="docs/screenshot-auto.png" width="100%" alt="auto 运行截图" /></td>
+</tr>
+</table>
+
+---
+
 ## 支持
 
 如果你觉得这个工具对你有帮助，欢迎打赏支持！
