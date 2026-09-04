@@ -8,6 +8,10 @@
     guet_drcom.sh 的 Windows 移植版，通过模拟 Dr.COM Portal 的 HTTP 请求实现
     校园网自动登录、注销、掉线检测与自动重连（借助 Windows 计划任务常驻）。
 
+    本版本（router 分支）面向「校园网口下串接路由器，设备接在 LAN 侧」的场景：
+    认证门户看到的是路由器 WAN 口的 IP / MAC，因此不探测本机网卡，
+    改为在 init 时由用户填写路由器 WAN 口的 IPv4 / MAC。
+
 .PARAMETER Command
     子命令：init / login / logout / auto / disable / check / help。
 
@@ -72,9 +76,7 @@ $CarrierNames    = @('校园网', '中国移动', '中国联通', '中国电信'
 $CarrierSuffixes = @('', '@cmcc', '@unicom', '@telecom', '@glgd')
 
 # 网络信息与流程状态（脚本作用域内共享）
-$script:InterfaceName        = ''
 $script:ClientIp             = ''
-$script:ClientIpv6           = ''
 $script:ClientMac            = ''
 $script:LogoutSucceeded      = $false
 $script:SelectedCarrierId    = 0
@@ -224,7 +226,7 @@ function Show-Usage {
     Write-Host ("{0}用法{1}  {2} <子命令>" -f $Bold, $Reset, $ScriptName)
 
     Write-Section '子命令'
-    Write-Host ("  {0}{1,-9}{2} {3}" -f $Green, 'init', $Reset, '初始化账号、密码和运营商')
+    Write-Host ("  {0}{1,-9}{2} {3}" -f $Green, 'init', $Reset, '初始化账号、密码、运营商及路由器 IP/MAC')
     Write-Host ("  {0}{1,-9}{2} {3}" -f $Green, 'login', $Reset, '注销旧会话后重新登录')
     Write-Host ("  {0}{1,-9}{2} {3}" -f $Green, 'logout', $Reset, '单独测试注销功能')
     Write-Host ("  {0}{1,-9}{2} {3}" -f $Green, 'auto', $Reset, '启用每分钟自动检测与重连')
@@ -316,6 +318,20 @@ function Invoke-Init {
     Select-Carrier
     $account = "$studentId$($script:SelectedCarrierSuffix)"
 
+    # 认证门户看到的是路由器 WAN 口的地址，本机网卡信息无用，须由用户填写
+    Write-Section '路由器 WAN 口信息'
+    Write-Host ("{0}可在路由器管理页的「WAN 口状态 / 上网设置」中查看{1}" -f $Dim, $Reset)
+    Write-Host ''
+    Write-Host ("{0}IPv4{1}  " -f $Bold, $Reset) -NoNewline
+    $routerIp = "$(Read-Host)".Trim()
+    if ([string]::IsNullOrEmpty($routerIp)) { Fail '路由器 IPv4 地址不能为空' }
+
+    Write-Host ("{0}MAC{1}   " -f $Bold, $Reset) -NoNewline
+    $routerMac = "$(Read-Host)".Trim()
+    if ([string]::IsNullOrEmpty($routerMac)) { Fail '路由器 MAC 地址不能为空' }
+
+    Resolve-Network -Ip $routerIp -Mac $routerMac
+
     $config = [ordered]@{
         StudentId         = $studentId
         CarrierId         = $script:SelectedCarrierId
@@ -323,6 +339,9 @@ function Invoke-Init {
         Account           = $account
         # DPAPI 加密：仅当前 Windows 用户在本机可解密
         PasswordEncrypted = (ConvertFrom-SecureString $securePassword)
+        # 路由器 WAN 口地址；IP 变化后可直接修改此处，无需重新 init
+        RouterIp          = $script:ClientIp
+        RouterMac         = $script:ClientMac
     }
     $json = $config | ConvertTo-Json
 
@@ -338,6 +357,7 @@ function Invoke-Init {
     Write-Success '初始化完成'
     Write-Value '登录账号' $account
     Write-Value '运营商' $script:SelectedCarrierName
+    Show-Network
     Write-Value '配置文件' $ConfigFile
 }
 
@@ -358,10 +378,14 @@ function Import-Config {
 
     # StrictMode 下访问不存在的属性会抛错，先判断属性是否存在
     $props = @($config.PSObject.Properties.Name)
-    $account   = if ($props -contains 'Account')           { $config.Account }           else { $null }
-    $encrypted = if ($props -contains 'PasswordEncrypted') { $config.PasswordEncrypted } else { $null }
+    $account    = if ($props -contains 'Account')           { $config.Account }           else { $null }
+    $encrypted  = if ($props -contains 'PasswordEncrypted') { $config.PasswordEncrypted } else { $null }
+    $routerIp   = if ($props -contains 'RouterIp')          { $config.RouterIp }          else { $null }
+    $routerMac  = if ($props -contains 'RouterMac')         { $config.RouterMac }         else { $null }
     if ([string]::IsNullOrEmpty($account))   { Fail "$ConfigFile 缺少 Account" }
     if ([string]::IsNullOrEmpty($encrypted)) { Fail "$ConfigFile 缺少 PasswordEncrypted" }
+    if ([string]::IsNullOrEmpty($routerIp))  { Fail "$ConfigFile 缺少 RouterIp，请重新运行 $ScriptName init" }
+    if ([string]::IsNullOrEmpty($routerMac)) { Fail "$ConfigFile 缺少 RouterMac，请重新运行 $ScriptName init" }
 
     try {
         $secure = ConvertTo-SecureString $encrypted -ErrorAction Stop
@@ -371,76 +395,32 @@ function Import-Config {
         Fail "密码解密失败（配置可能由其他用户或其他机器生成），请重新运行 $ScriptName init"
     }
     $script:DrcomAccount = $account
+    Resolve-Network -Ip $routerIp -Mac $routerMac
 }
 
 # --------------------------------------------------------------------------
-# 网络探测：接口 / IPv4 / IPv6 / MAC
+# 路由器 WAN 口地址：规范化并校验 IPv4 / MAC（来自 init 输入或配置文件）
 # --------------------------------------------------------------------------
-function Get-NetworkInfo {
-    $interfaceName = $env:INTERFACE
-    $clientIp      = $env:CLIENT_IP
-    $clientIpv6    = $env:CLIENT_IPV6
-    $clientMac     = $env:CLIENT_MAC
-
-    if ([string]::IsNullOrEmpty($interfaceName) -or [string]::IsNullOrEmpty($clientIp) -or
-        [string]::IsNullOrEmpty($clientMac) -or [string]::IsNullOrEmpty($clientIpv6)) {
-
-        $route = $null
-        try {
-            # Find-NetRoute 会输出源地址对象与路由对象，取带 IPAddress 属性的那个
-            $route = Find-NetRoute -RemoteIPAddress $ServerIP -ErrorAction Stop |
-                Where-Object { $_.PSObject.Properties['IPAddress'] -and $_.IPAddress } |
-                Select-Object -First 1
-        } catch {
-            Fail "无法确定通往 $ServerIP 的网络路由：$($_.Exception.Message)"
-        }
-        if (-not $route) { Fail "无法确定通往 $ServerIP 的网络接口" }
-
-        $ifIndex = $route.InterfaceIndex
-        if ([string]::IsNullOrEmpty($clientIp)) { $clientIp = $route.IPAddress }
-
-        $adapter = $null
-        try { $adapter = Get-NetAdapter -InterfaceIndex $ifIndex -ErrorAction Stop } catch { }
-        if ([string]::IsNullOrEmpty($interfaceName) -and $adapter) { $interfaceName = $adapter.Name }
-        if ([string]::IsNullOrEmpty($clientMac) -and $adapter)     { $clientMac = $adapter.MacAddress }
-
-        if ([string]::IsNullOrEmpty($clientIpv6)) {
-            try {
-                $ipv6 = Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv6 -ErrorAction SilentlyContinue |
-                    Where-Object { $_.IPAddress -notmatch '^fe80' -and $_.PrefixOrigin -ne 'WellKnown' } |
-                    Select-Object -First 1 -ExpandProperty IPAddress
-                if ($ipv6) { $clientIpv6 = $ipv6 }
-            } catch { }
-        }
-    }
-
-    if ([string]::IsNullOrEmpty($interfaceName)) { $interfaceName = '未知' }
-    if ([string]::IsNullOrEmpty($clientIp))  { Fail "无法读取接口 $interfaceName 的 IPv4 地址" }
-    if ([string]::IsNullOrEmpty($clientMac)) { Fail "无法读取接口 $interfaceName 的 MAC 地址" }
+function Resolve-Network {
+    param([string]$Ip, [string]$Mac)
 
     # 规范化 MAC 为 12 位小写十六进制
-    $clientMac = ($clientMac -replace '[:\-]', '').ToLower()
-    if ($clientMac -notmatch '^[0-9a-f]{12}$') { Fail "MAC 地址格式无效：$clientMac" }
+    $Mac = ($Mac.Trim() -replace '[:\-]', '').ToLower()
+    if ($Mac -notmatch '^[0-9a-f]{12}$') { Fail "MAC 地址格式无效：$Mac" }
 
-    # 去掉 IPv6 的 zone id（%eth0 之类）
-    if ([string]::IsNullOrEmpty($clientIpv6)) { $clientIpv6 = '' } else { $clientIpv6 = $clientIpv6 -replace '%.*$', '' }
-
-    if ($clientIp -notmatch '^(\d{1,3}\.){3}\d{1,3}$') { Fail "IPv4 地址格式无效：$clientIp" }
-    foreach ($octet in $clientIp.Split('.')) {
-        if ([int]$octet -gt 255) { Fail "IPv4 地址格式无效：$clientIp" }
+    $Ip = $Ip.Trim()
+    if ($Ip -notmatch '^(\d{1,3}\.){3}\d{1,3}$') { Fail "IPv4 地址格式无效：$Ip" }
+    foreach ($octet in $Ip.Split('.')) {
+        if ([int]$octet -gt 255) { Fail "IPv4 地址格式无效：$Ip" }
     }
 
-    $script:InterfaceName = $interfaceName
-    $script:ClientIp      = $clientIp
-    $script:ClientIpv6    = $clientIpv6
-    $script:ClientMac     = $clientMac
+    $script:ClientIp  = $Ip
+    $script:ClientMac = $Mac
 }
 
 function Show-Network {
-    Write-Section '网络信息'
-    Write-Value '网络接口' $script:InterfaceName
+    Write-Section '路由器 WAN 口信息'
     Write-Value 'IPv4' $script:ClientIp
-    Write-Value 'IPv6' $(if ($script:ClientIpv6) { $script:ClientIpv6 } else { '未获取' })
     Write-Value 'MAC' $script:ClientMac
 }
 
@@ -493,7 +473,7 @@ function Send-Logout {
         @('ac_logout', '1'),
         @('register_mode', '1'),
         @('wlan_user_ip', $script:ClientIp),
-        @('wlan_user_ipv6', $script:ClientIpv6),
+        @('wlan_user_ipv6', ''),
         @('wlan_vlan_id', '1'),
         @('wlan_user_mac', $script:ClientMac),
         @('wlan_ac_ip', ''),
@@ -529,7 +509,7 @@ function Send-Login {
         @('R6', '0'),
         @('para', '00'),
         @('v4ip', $script:ClientIp),
-        @('v6ip', $script:ClientIpv6),
+        @('v6ip', ''),
         @('terminal_type', '1'),
         @('lang', 'zh-cn'),
         @('jsVersion', '4.2'),
@@ -550,7 +530,7 @@ function Send-Login {
 # --------------------------------------------------------------------------
 function Invoke-Logout {
     Write-Header '注销校园网会话'
-    Get-NetworkInfo
+    Import-Config
     Show-Network
 
     if ($DryRun -eq '1') {
@@ -566,7 +546,6 @@ function Invoke-Logout {
 function Invoke-Login {
     Write-Header '登录校园网'
     Import-Config
-    Get-NetworkInfo
     Show-Network
     Write-Value '登录账号' $script:DrcomAccount
 

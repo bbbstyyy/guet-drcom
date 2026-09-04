@@ -84,7 +84,7 @@ usage() {
     ui_header '校园网认证工具'
     printf '%b用法%b  %s <子命令>\n' "$BOLD" "$RESET" "$(basename "$0")"
     ui_section '子命令'
-    printf '  %b%-9s%b %s\n' "$GREEN" 'init' "$RESET" '初始化账号、密码和运营商'
+    printf '  %b%-9s%b %s\n' "$GREEN" 'init' "$RESET" '初始化账号、密码、运营商及路由器 IP/MAC'
     printf '  %b%-9s%b %s\n' "$GREEN" 'login' "$RESET" '注销旧会话后重新登录'
     printf '  %b%-9s%b %s\n' "$GREEN" 'logout' "$RESET" '单独测试注销功能'
     printf '  %b%-9s%b %s\n' "$GREEN" 'auto' "$RESET" '启用每分钟自动检测与重连'
@@ -157,7 +157,7 @@ write_env_value() {
 }
 
 init_command() {
-    local student_id password account temp_file
+    local student_id password account temp_file router_ip router_mac
 
     [[ -t 0 ]] || fail "init 需要在交互式终端中运行"
 
@@ -173,6 +173,19 @@ init_command() {
 
     select_carrier
     account="${student_id}${SELECTED_CARRIER_SUFFIX}"
+
+    # 认证门户看到的是路由器 WAN 口的地址，本机网卡信息无用，须由用户填写
+    ui_section '路由器 WAN 口信息'
+    printf '%b可在路由器管理页的「WAN 口状态 / 上网设置」中查看%b\n\n' "$DIM" "$RESET"
+    printf '%bIPv4%b  ' "$BOLD" "$RESET"
+    read -r router_ip
+    [[ -n $router_ip ]] || fail "路由器 IPv4 地址不能为空"
+
+    printf '%bMAC%b   ' "$BOLD" "$RESET"
+    read -r router_mac
+    [[ -n $router_mac ]] || fail "路由器 MAC 地址不能为空"
+
+    resolve_network "$router_ip" "$router_mac"
     temp_file="${CONFIG_FILE}.tmp.$$"
 
     umask 077
@@ -184,6 +197,9 @@ init_command() {
         write_env_value DRCOM_CARRIER_NAME "$SELECTED_CARRIER_NAME"
         write_env_value DRCOM_ACCOUNT "$account"
         write_env_value DRCOM_PASSWORD "$password"
+        printf '# 路由器 WAN 口地址；IP 变化后可直接修改此处，无需重新 init。\n'
+        write_env_value DRCOM_ROUTER_IP "$client_ip"
+        write_env_value DRCOM_ROUTER_MAC "$client_mac"
     } >"$temp_file"
     chmod 600 "$temp_file"
     mv -f -- "$temp_file" "$CONFIG_FILE"
@@ -192,6 +208,7 @@ init_command() {
     ui_success '初始化完成'
     ui_value '登录账号' "$account"
     ui_value '运营商' "$SELECTED_CARRIER_NAME"
+    print_network
     ui_value '配置文件' "$CONFIG_FILE"
 }
 
@@ -205,71 +222,22 @@ load_config() {
 
     [[ -n ${DRCOM_ACCOUNT:-} ]] || fail "$CONFIG_FILE 缺少 DRCOM_ACCOUNT"
     [[ -n ${DRCOM_PASSWORD:-} ]] || fail "$CONFIG_FILE 缺少 DRCOM_PASSWORD"
+    [[ -n ${DRCOM_ROUTER_IP:-} ]] || fail "$CONFIG_FILE 缺少 DRCOM_ROUTER_IP，请重新运行 $(basename "$0") init"
+    [[ -n ${DRCOM_ROUTER_MAC:-} ]] || fail "$CONFIG_FILE 缺少 DRCOM_ROUTER_MAC，请重新运行 $(basename "$0") init"
+
+    resolve_network "$DRCOM_ROUTER_IP" "$DRCOM_ROUTER_MAC"
 }
 
-detect_network() {
-    interface=${INTERFACE:-}
-    client_ip=${CLIENT_IP:-}
-    client_ipv6=${CLIENT_IPV6:-}
-    client_mac=${CLIENT_MAC:-}
-
-    case $(uname -s) in
-        Darwin)
-            if [[ -z $interface ]]; then
-                command -v route >/dev/null 2>&1 || fail "找不到 route 命令"
-                interface=$(route -n get "$SERVER_IP" 2>/dev/null | awk '/interface:/{print $2; exit}')
-            fi
-            [[ -n $interface ]] || fail "无法确定通往 $SERVER_IP 的网络接口"
-
-            if [[ -z $client_ip ]]; then
-                command -v ipconfig >/dev/null 2>&1 || fail "找不到 ipconfig 命令"
-                client_ip=$(ipconfig getifaddr "$interface" 2>/dev/null || true)
-            fi
-            if [[ -z $client_mac ]]; then
-                command -v ifconfig >/dev/null 2>&1 || fail "找不到 ifconfig 命令"
-                client_mac=$(ifconfig "$interface" 2>/dev/null | awk '/ether /{print $2; exit}')
-            fi
-            if [[ -z $client_ipv6 ]]; then
-                client_ipv6=$(ifconfig "$interface" 2>/dev/null | awk '/inet6 / && $2 !~ /^fe80:/{print $2; exit}')
-            fi
-            ;;
-        Linux)
-            command -v ip >/dev/null 2>&1 || fail "找不到 ip 命令"
-
-            if [[ -z $interface || -z $client_ip ]]; then
-                local route_info
-                route_info=$(ip -4 route get "$SERVER_IP" 2>/dev/null || true)
-                if [[ -z $interface ]]; then
-                    interface=$(awk '{for (i=1; i<=NF; i++) if ($i == "dev") {print $(i+1); exit}}' <<<"$route_info")
-                fi
-                if [[ -z $client_ip ]]; then
-                    client_ip=$(awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}' <<<"$route_info")
-                fi
-            fi
-            [[ -n $interface ]] || fail "无法确定通往 $SERVER_IP 的网络接口"
-
-            if [[ -z $client_mac ]]; then
-                client_mac=$(ip link show dev "$interface" 2>/dev/null | awk '/link\/ether/{print $2; exit}')
-            fi
-            if [[ -z $client_ipv6 ]]; then
-                client_ipv6=$(ip -6 addr show dev "$interface" scope global 2>/dev/null | awk '/inet6 /{sub(/\/.*/, "", $2); print $2; exit}')
-            fi
-            ;;
-        *)
-            fail "暂不支持的系统：$(uname -s)"
-            ;;
-    esac
-
-    [[ -n $client_ip ]] || fail "无法读取接口 $interface 的 IPv4 地址"
-    [[ -n $client_mac ]] || fail "无法读取接口 $interface 的 MAC 地址"
+# 规范化并校验路由器 WAN 口地址，结果写入 client_ip / client_mac
+resolve_network() {
+    local octet ipv4_octets
+    client_ip=$1
+    client_mac=$2
 
     client_mac=$(tr -d ':-' <<<"$client_mac" | tr '[:upper:]' '[:lower:]' | tr -d '\n')
-    client_ipv6=${client_ipv6%%%*}
 
     [[ $client_mac =~ ^[0-9a-f]{12}$ ]] || fail "MAC 地址格式无效：$client_mac"
     [[ $client_ip =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || fail "IPv4 地址格式无效：$client_ip"
-
-    local octet
     IFS=. read -r -a ipv4_octets <<<"$client_ip"
     for octet in "${ipv4_octets[@]}"; do
         ((10#$octet <= 255)) || fail "IPv4 地址格式无效：$client_ip"
@@ -297,7 +265,7 @@ send_logout() {
         --data-urlencode 'ac_logout=1' \
         --data-urlencode 'register_mode=1' \
         --data-urlencode "wlan_user_ip=$client_ip" \
-        --data-urlencode "wlan_user_ipv6=$client_ipv6" \
+        --data-urlencode 'wlan_user_ipv6=' \
         --data-urlencode 'wlan_vlan_id=1' \
         --data-urlencode "wlan_user_mac=$client_mac" \
         --data-urlencode 'wlan_ac_ip=' \
@@ -339,7 +307,7 @@ send_login() {
         --data-urlencode 'R6=0' \
         --data-urlencode 'para=00' \
         --data-urlencode "v4ip=$client_ip" \
-        --data-urlencode "v6ip=$client_ipv6" \
+        --data-urlencode 'v6ip=' \
         --data-urlencode 'terminal_type=1' \
         --data-urlencode 'lang=zh-cn' \
         --data-urlencode 'jsVersion=4.2' \
@@ -355,16 +323,14 @@ send_login() {
 }
 
 print_network() {
-    ui_section '网络信息'
-    ui_value '网络接口' "$interface"
+    ui_section '路由器 WAN 口信息'
     ui_value 'IPv4' "$client_ip"
-    ui_value 'IPv6' "${client_ipv6:-未获取}"
     ui_value 'MAC' "$client_mac"
 }
 
 logout_command() {
     ui_header '注销校园网会话'
-    detect_network
+    load_config
     print_network
 
     if [[ $DRY_RUN == 1 ]]; then
@@ -381,7 +347,6 @@ logout_command() {
 login_command() {
     ui_header '登录校园网'
     load_config
-    detect_network
     print_network
     ui_value '登录账号' "$DRCOM_ACCOUNT"
 

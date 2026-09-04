@@ -8,6 +8,8 @@
 
 两个版本认证流程一致，按平台选其一即可。
 
+> **本分支（`router`）适用于校园网口下串接了路由器的场景**：电脑等设备接在路由器 LAN 侧，认证门户看到的是路由器 WAN 口的 IP 和 MAC，本机网卡信息无用。因此本分支不再自动探测网卡，改为在 `init` 时手动填写路由器 WAN 口的 IPv4 和 MAC，之后 `login` / `logout` / `auto` 全部使用这组地址。若设备直接接入校园网（中间没有路由器），请使用 `main` 分支。
+
 ---
 
 ## 运行示例
@@ -36,7 +38,7 @@
 在脚本目录下：
 
 ```bash
-./guet_drcom.sh init      # 初始化：填学号、密码、选运营商
+./guet_drcom.sh init      # 初始化：填学号、密码、选运营商、填路由器 WAN 口 IP/MAC
 ./guet_drcom.sh login     # 登录
 ./guet_drcom.sh auto      # 开启每分钟自动检测与重连（推荐）
 ./guet_drcom.sh disable   # 关闭自动重连
@@ -63,7 +65,7 @@ powershell -ExecutionPolicy Bypass -File .\guet_drcom.ps1 auto
 
 | 命令 | 作用 |
 |------|------|
-| `init` | 交互式录入学号、密码、运营商，生成配置文件 |
+| `init` | 交互式录入学号、密码、运营商及路由器 WAN 口 IPv4/MAC，生成配置文件 |
 | `login` | 注销旧会话后重新登录 |
 | `logout` | 单独注销 |
 | `auto` | 注册定时任务，每分钟检测掉线并自动重连 |
@@ -83,6 +85,17 @@ powershell -ExecutionPolicy Bypass -File .\guet_drcom.ps1 auto
 | 4 | 中国电信 | `@telecom` |
 | 5 | 中国广电 | `@glgd` |
 
+## 路由器 WAN 口信息
+
+`init` 最后会要求填写路由器 WAN 口的地址。登录路由器管理页（常见为 `192.168.1.1` 或 `192.168.0.1`），在「WAN 口状态」「上网设置」或「系统状态」中即可看到：
+
+| 项目 | 必填 | 说明 |
+|------|------|------|
+| IPv4 | 是 | 校园网分配给路由器 WAN 口的地址（不是电脑的 `192.168.x.x`） |
+| MAC | 是 | WAN 口 MAC；`AA:BB:CC:DD:EE:FF`、`aa-bb-cc-dd-ee-ff`、`aabbccddeeff` 均可，保存时统一为 12 位小写 |
+
+> **WAN 口 IP 变化后**（路由器重启、DHCP 重新分配等）认证会失败。此时直接改配置文件即可，无需重新 `init`：bash 版改 `.env` 里的 `DRCOM_ROUTER_IP`，Windows 版改 `guet_drcom.config.json` 里的 `RouterIp`。若路由器开启了 WAN 口 MAC 克隆/随机化，请以路由器实际对外使用的 MAC 为准。
+
 ---
 
 ## 注意事项
@@ -95,7 +108,7 @@ powershell -ExecutionPolicy Bypass -File .\guet_drcom.ps1 auto
 
 以下变量可覆盖默认值，两平台一致：
 
-`SERVER_IP`、`STATUS_URL`、`LOGIN_URL`、`LOGOUT_URL`、`LOGOUT_DELAY`、`DRY_RUN`、`AUTO_LOG`、`GUET_DRCOM_ENV`（配置文件路径），以及 `INTERFACE`/`CLIENT_IP`/`CLIENT_IPV6`/`CLIENT_MAC`（手动指定网络信息）。
+`SERVER_IP`、`STATUS_URL`、`LOGIN_URL`、`LOGOUT_URL`、`LOGOUT_DELAY`、`DRY_RUN`、`AUTO_LOG`、`GUET_DRCOM_ENV`（配置文件路径）。路由器 IP/MAC 只从配置文件读取，本分支不再支持 `INTERFACE` / `CLIENT_IP` / `CLIENT_MAC` 等环境变量覆盖。
 
 ```powershell
 # 示例：只探测网络、不真正发请求

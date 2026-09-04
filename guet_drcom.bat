@@ -32,7 +32,7 @@ cls
 echo ==================================
 echo    GUET Dr.COM   Launcher
 echo ==================================
-echo    [1] init      set account / carrier
+echo    [1] init      set account / carrier / router ip+mac
 echo    [2] login     re-login
 echo    [3] logout    test logout
 echo    [4] auto      enable auto-reconnect
