@@ -108,7 +108,9 @@ powershell -ExecutionPolicy Bypass -File .\guet_drcom.ps1 auto
 
 以下变量可覆盖默认值，两平台一致：
 
-`SERVER_IP`、`STATUS_URL`、`LOGIN_URL`、`LOGOUT_URL`、`LOGOUT_DELAY`、`DRY_RUN`、`AUTO_LOG`、`GUET_DRCOM_ENV`（配置文件路径）。路由器 IP/MAC 只从配置文件读取，本分支不再支持 `INTERFACE` / `CLIENT_IP` / `CLIENT_MAC` 等环境变量覆盖。
+`SERVER_IP`、`STATUS_URL`、`LOGIN_URL`、`LOGOUT_URL`、`LOGOUT_DELAY`、`LOGIN_TIMEOUT`、`LOGIN_RETRIES`、`LOGIN_RETRY_DELAY`、`DRY_RUN`、`AUTO_LOG`、`GUET_DRCOM_ENV`（配置文件路径）。路由器 IP/MAC 只从配置文件读取，本分支不再支持 `INTERFACE` / `CLIENT_IP` / `CLIENT_MAC` 等环境变量覆盖。
+
+> 注销后 RADIUS 服务端需要 20~30 秒缓冲，期间登录会返回 `Auth Server Timeout !!!` 或 `Rad:Oppp error: Timeout 40`，且首次请求本身可能耗时十几秒。因此登录请求超时默认 25 秒（`LOGIN_TIMEOUT`），失败后最多重试 5 次（`LOGIN_RETRIES`），每次间隔 3 秒（`LOGIN_RETRY_DELAY`）。实测在第 3 次尝试前后成功，`login` 整体耗时约 35 秒。
 
 ```powershell
 # 示例：只探测网络、不真正发请求

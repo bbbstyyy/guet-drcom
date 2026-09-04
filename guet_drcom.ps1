@@ -66,6 +66,11 @@ $StatusUrl   = if ($env:STATUS_URL)   { $env:STATUS_URL }   else { "http://$Serv
 $LogoutUrl   = if ($env:LOGOUT_URL)   { $env:LOGOUT_URL }   else { "http://${ServerIP}:801/eportal/portal/logout" }
 $LoginUrl    = if ($env:LOGIN_URL)    { $env:LOGIN_URL }    else { "http://$ServerIP/drcom/login" }
 $LogoutDelay = if ($env:LOGOUT_DELAY) { [int]$env:LOGOUT_DELAY } else { 1 }
+# 注销后 RADIUS 服务端需要 20~30s 缓冲，期间登录会返回 Auth Server Timeout /
+# Rad:Oppp error，故登录超时放宽并允许多次重试（实测第 3 次前后成功）
+$LoginTimeout    = if ($env:LOGIN_TIMEOUT)     { [int]$env:LOGIN_TIMEOUT }     else { 25 }
+$LoginRetries    = if ($env:LOGIN_RETRIES)     { [int]$env:LOGIN_RETRIES }     else { 5 }
+$LoginRetryDelay = if ($env:LOGIN_RETRY_DELAY) { [int]$env:LOGIN_RETRY_DELAY } else { 3 }
 $DryRun      = if ($env:DRY_RUN)      { $env:DRY_RUN }      else { '0' }
 $AutoLog     = if ($env:AUTO_LOG)     { $env:AUTO_LOG }     else { Join-Path $ScriptDir 'guet_drcom.log' }
 
@@ -436,7 +441,8 @@ function ConvertTo-Query {
 }
 
 function Invoke-DrcomRequest {
-    param([string]$BaseUrl, [object[]]$Pairs)
+    # -TimeoutSec：请求超时；-Tolerant：失败时返回空串而不终止脚本（供登录重试）
+    param([string]$BaseUrl, [object[]]$Pairs, [int]$TimeoutSec = 8, [switch]$Tolerant)
     $url = '{0}?{1}' -f $BaseUrl, (ConvertTo-Query $Pairs)
 
     # 使用 HttpClient + UseProxy=$false，强制直连门户（避开系统/环境代理）。
@@ -446,12 +452,13 @@ function Invoke-DrcomRequest {
     $handler.UseProxy = $false
     $client = New-Object System.Net.Http.HttpClient($handler)
     try {
-        $client.Timeout = [TimeSpan]::FromSeconds(8)
+        $client.Timeout = [TimeSpan]::FromSeconds($TimeoutSec)
         [void]$client.DefaultRequestHeaders.TryAddWithoutValidation('Accept', '*/*')
         $client.DefaultRequestHeaders.Referrer = [Uri]("http://$ServerIP/")
         $bytes = $client.GetByteArrayAsync($url).GetAwaiter().GetResult()
         return [System.Text.Encoding]::UTF8.GetString($bytes)
     } catch {
+        if ($Tolerant) { return '' }
         Fail "请求失败：$($_.Exception.Message)"
     } finally {
         $client.Dispose()
@@ -482,8 +489,8 @@ function Send-Logout {
         @('v', "$cacheBuster"),
         @('lang', 'zh')
     )
-    $response = Invoke-DrcomRequest -BaseUrl $LogoutUrl -Pairs $pairs
-    Write-Host ("  {0}服务器{1}  {2}" -f $Dim, $Reset, $response)
+    $response = Invoke-DrcomRequest -BaseUrl $LogoutUrl -Pairs $pairs -Tolerant
+    Write-Host ("  {0}服务器{1}  {2}" -f $Dim, $Reset, $(if ($response) { $response } else { '（请求失败或超时）' }))
 
     $compact = $response -replace '\s', ''
     # 要求 1 后非数字，避免 "result":10 / 12 等误判为成功
@@ -495,34 +502,44 @@ function Send-Logout {
 }
 
 function Send-Login {
-    $cacheBuster = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    for ($attempt = 1; ; $attempt++) {
+        $cacheBuster = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        $label = if ($attempt -eq 1) { '[2/2]' } else { "[2/2 第 $attempt 次]" }
+        Write-Step $label '正在提交登录认证…'
+        $pairs = @(
+            @('callback', 'dr1004'),
+            @('DDDDD', $script:DrcomAccount),
+            @('upass', $script:DrcomPassword),
+            @('0MKKey', '123456'),
+            @('R1', '0'),
+            @('R2', ''),
+            @('R3', '0'),
+            @('R6', '0'),
+            @('para', '00'),
+            @('v4ip', $script:ClientIp),
+            @('v6ip', ''),
+            @('terminal_type', '1'),
+            @('lang', 'zh-cn'),
+            @('jsVersion', '4.2'),
+            @('v', "$cacheBuster"),
+            @('lang', 'zh')
+        )
+        # -Tolerant：超时不终止脚本，交由本循环重试
+        $response = Invoke-DrcomRequest -BaseUrl $LoginUrl -Pairs $pairs `
+            -TimeoutSec $LoginTimeout -Tolerant
+        Write-Host ("  {0}服务器{1}  {2}" -f $Dim, $Reset, $(if ($response) { $response } else { '（请求失败或超时）' }))
 
-    Write-Step '[2/2]' '正在提交登录认证…'
-    $pairs = @(
-        @('callback', 'dr1004'),
-        @('DDDDD', $script:DrcomAccount),
-        @('upass', $script:DrcomPassword),
-        @('0MKKey', '123456'),
-        @('R1', '0'),
-        @('R2', ''),
-        @('R3', '0'),
-        @('R6', '0'),
-        @('para', '00'),
-        @('v4ip', $script:ClientIp),
-        @('v6ip', ''),
-        @('terminal_type', '1'),
-        @('lang', 'zh-cn'),
-        @('jsVersion', '4.2'),
-        @('v', "$cacheBuster"),
-        @('lang', 'zh')
-    )
-    $response = Invoke-DrcomRequest -BaseUrl $LoginUrl -Pairs $pairs
-    Write-Host ("  {0}服务器{1}  {2}" -f $Dim, $Reset, $response)
-
-    $compact = $response -replace '\s', ''
-    # 要求 1 后非数字，避免 "result":10 / 12 等误判为成功
-    if ($compact -notmatch '"result":1([^0-9]|$)') { Fail '登录失败，服务器未返回 result=1' }
-    Write-Success '登录成功'
+        $compact = $response -replace '\s', ''
+        # 要求 1 后非数字，避免 "result":10 / 12 等误判为成功
+        if ($compact -match '"result":1([^0-9]|$)') {
+            Write-Success '登录成功'
+            return
+        }
+        if ($attempt -ge $LoginRetries) { break }
+        Write-Warn "本次未登录成功，${LoginRetryDelay}s 后重试（注销后首次认证常需等待）"
+        Start-Sleep -Seconds $LoginRetryDelay
+    }
+    Fail "登录失败，$LoginRetries 次尝试均未返回 result=1"
 }
 
 # --------------------------------------------------------------------------

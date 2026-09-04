@@ -11,6 +11,11 @@ STATUS_URL=${STATUS_URL:-http://${SERVER_IP}/}
 LOGOUT_URL=${LOGOUT_URL:-http://${SERVER_IP}:801/eportal/portal/logout}
 LOGIN_URL=${LOGIN_URL:-http://${SERVER_IP}/drcom/login}
 LOGOUT_DELAY=${LOGOUT_DELAY:-1}
+# 注销后 RADIUS 服务端需要 20~30s 缓冲，期间登录会返回 Auth Server Timeout /
+# Rad:Oppp error，故登录超时放宽并允许多次重试（实测第 3 次前后成功）
+LOGIN_TIMEOUT=${LOGIN_TIMEOUT:-25}
+LOGIN_RETRIES=${LOGIN_RETRIES:-5}
+LOGIN_RETRY_DELAY=${LOGIN_RETRY_DELAY:-3}
 DRY_RUN=${DRY_RUN:-0}
 AUTO_LOG=${AUTO_LOG:-"$SCRIPT_DIR/guet_drcom.log"}
 
@@ -273,8 +278,8 @@ send_logout() {
         --data-urlencode 'jsVersion=4.2' \
         --data-urlencode "v=$cache_buster" \
         --data-urlencode 'lang=zh' \
-        "$LOGOUT_URL")
-    printf '  %b服务器%b  %s\n' "$DIM" "$RESET" "$response"
+        "$LOGOUT_URL") || response=''
+    printf '  %b服务器%b  %s\n' "$DIM" "$RESET" "${response:-（请求失败或超时）}"
 
     compact=$(tr -d '[:space:]' <<<"$response")
     # 要求 1 后非数字，避免 "result":10 / 12 等误判为成功
@@ -286,40 +291,54 @@ send_logout() {
 }
 
 send_login() {
-    local cache_buster response compact
-    cache_buster=$(date +%s)
+    local attempt=1 cache_buster response compact label
 
-    ui_step '[2/2]' '正在提交登录认证…'
-    # --noproxy '*': 校园认证须直连门户，避免 http_proxy / 系统代理劫持
-    response=$(curl --silent --show-error --compressed --get \
-        --noproxy '*' \
-        --connect-timeout 5 \
-        --max-time 8 \
-        --header 'Accept: */*' \
-        --header "Referer: http://${SERVER_IP}/" \
-        --data-urlencode 'callback=dr1004' \
-        --data-urlencode "DDDDD=$DRCOM_ACCOUNT" \
-        --data-urlencode "upass=$DRCOM_PASSWORD" \
-        --data-urlencode '0MKKey=123456' \
-        --data-urlencode 'R1=0' \
-        --data-urlencode 'R2=' \
-        --data-urlencode 'R3=0' \
-        --data-urlencode 'R6=0' \
-        --data-urlencode 'para=00' \
-        --data-urlencode "v4ip=$client_ip" \
-        --data-urlencode 'v6ip=' \
-        --data-urlencode 'terminal_type=1' \
-        --data-urlencode 'lang=zh-cn' \
-        --data-urlencode 'jsVersion=4.2' \
-        --data-urlencode "v=$cache_buster" \
-        --data-urlencode 'lang=zh' \
-        "$LOGIN_URL")
-    printf '  %b服务器%b  %s\n' "$DIM" "$RESET" "$response"
+    while :; do
+        cache_buster=$(date +%s)
+        label='[2/2]'
+        ((attempt == 1)) || label="[2/2 第 $attempt 次]"
+        ui_step "$label" '正在提交登录认证…'
+        # --noproxy '*': 校园认证须直连门户，避免 http_proxy / 系统代理劫持
+        # curl 失败（多为超时）不直接中断脚本，交由下面的重试逻辑处理
+        response=$(curl --silent --show-error --compressed --get \
+            --noproxy '*' \
+            --connect-timeout 5 \
+            --max-time "$LOGIN_TIMEOUT" \
+            --header 'Accept: */*' \
+            --header "Referer: http://${SERVER_IP}/" \
+            --data-urlencode 'callback=dr1004' \
+            --data-urlencode "DDDDD=$DRCOM_ACCOUNT" \
+            --data-urlencode "upass=$DRCOM_PASSWORD" \
+            --data-urlencode '0MKKey=123456' \
+            --data-urlencode 'R1=0' \
+            --data-urlencode 'R2=' \
+            --data-urlencode 'R3=0' \
+            --data-urlencode 'R6=0' \
+            --data-urlencode 'para=00' \
+            --data-urlencode "v4ip=$client_ip" \
+            --data-urlencode 'v6ip=' \
+            --data-urlencode 'terminal_type=1' \
+            --data-urlencode 'lang=zh-cn' \
+            --data-urlencode 'jsVersion=4.2' \
+            --data-urlencode "v=$cache_buster" \
+            --data-urlencode 'lang=zh' \
+            "$LOGIN_URL") || response=''
+        printf '  %b服务器%b  %s\n' "$DIM" "$RESET" "${response:-（请求失败或超时）}"
 
-    compact=$(tr -d '[:space:]' <<<"$response")
-    # 要求 1 后非数字，避免 "result":10 / 12 等误判为成功
-    [[ $compact =~ \"result\":1([^0-9]|$) ]] || fail "登录失败，服务器未返回 result=1"
-    ui_success '登录成功'
+        compact=$(tr -d '[:space:]' <<<"$response")
+        # 要求 1 后非数字，避免 "result":10 / 12 等误判为成功
+        if [[ $compact =~ \"result\":1([^0-9]|$) ]]; then
+            ui_success '登录成功'
+            return
+        fi
+
+        ((attempt < LOGIN_RETRIES)) || break
+        ui_warning "本次未登录成功，${LOGIN_RETRY_DELAY}s 后重试（注销后首次认证常需等待）"
+        sleep "$LOGIN_RETRY_DELAY"
+        attempt=$((attempt + 1))
+    done
+
+    fail "登录失败，${LOGIN_RETRIES} 次尝试均未返回 result=1"
 }
 
 print_network() {
