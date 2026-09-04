@@ -73,6 +73,8 @@ powershell -ExecutionPolicy Bypass -File .\guet_drcom.ps1 auto
 | `check` | 检测是否在线，掉线则自动登录（供定时任务调用） |
 | `help` | 显示帮助与当前状态 |
 
+> `check` 由定时任务每分钟调用，但单次重连最坏要跑两三分钟（登录重试到底）。两个版本都为此做了自我互斥：上一轮还没结束时本轮直接跳过，并在日志里记一行，避免两个实例互相注销对方正在建立的会话（Windows 计划任务的 `MultipleInstances IgnoreNew` 只挡得住同一任务的重入，挡不住「手动运行 + 定时任务」撞车）。检测到掉线时也会**先直接登录一次**，只有这次失败才注销后重来——状态探测存在误判可能（门户抖动、响应被截断、编码取不到），无条件注销会把一个本来健康的会话拆掉。
+
 ## 运营商
 
 `init` 时用 ↑/↓ 或数字 1–5 选择，决定账号后缀：
@@ -102,13 +104,19 @@ powershell -ExecutionPolicy Bypass -File .\guet_drcom.ps1 auto
 
 > **安全提示**：bash 版密码以明文存在 `.env`，务必 `chmod 600` 限本人访问；Windows 版用 DPAPI 加密，配置文件绑定本机当前用户，换用户或换电脑需重新 `init`。
 
+> **macOS：cron 需要「完全磁盘访问权限」。** `~/Desktop`、`~/Documents`、`~/Downloads` 受系统隐私保护，未授权时 cron 读不到脚本和 `.env`，`auto` 会**静默失效**（症状就是日志一直没有新内容）。若项目放在这些目录下，`auto` 会给出提醒；解决办法是到「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中添加 `/usr/sbin/cron`，或把项目移到该限制之外的目录。
+
 > 提示：Windows 版计划任务经 `wscript.exe` 隐藏启动，部分杀毒软件可能拦截；若 `auto` 启用后日志长期无新内容，可检查安全软件是否拦截了 `wscript.exe` 或删除了 `guet_drcom_hidden.vbs`。
+
+> `auto` 启用时会按 cron 实际使用的 `PATH`（`/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`）校验 `curl` 与 `iconv`。若依赖装在 Homebrew 目录（Apple Silicon 为 `/opt/homebrew/bin`）而不在上述路径中，`auto` 会直接报错而不是等定时任务每分钟静默失败一次。
 
 ## 环境变量（可选）
 
 以下变量可覆盖默认值，两平台一致：
 
 `SERVER_IP`、`STATUS_URL`、`LOGIN_URL`、`LOGOUT_URL`、`LOGOUT_DELAY`、`LOGIN_TIMEOUT`、`LOGIN_RETRIES`、`LOGIN_RETRY_DELAY`、`DRY_RUN`、`AUTO_LOG`、`GUET_DRCOM_ENV`（配置文件路径）。路由器 IP/MAC 只从配置文件读取，本分支不再支持 `INTERFACE` / `CLIENT_IP` / `CLIENT_MAC` 等环境变量覆盖。
+
+两平台另有两个：`AUTO_LOG_MAX`（日志超过此字节数即轮转为 `.log.1`，默认 1 MiB——持续掉线时每分钟写约 20 行，不轮转会无界增长）、`LOCK_STALE`（互斥锁的过期秒数，默认 600；持有进程已消失或持锁超过此时长即视为崩溃残留，可被下一轮抢占）。
 
 > 注销后 RADIUS 服务端需要 20~30 秒缓冲，期间登录会返回 `Auth Server Timeout !!!` 或 `Rad:Oppp error: Timeout 40`，且首次请求本身可能耗时十几秒。因此登录请求超时默认 25 秒（`LOGIN_TIMEOUT`），失败后最多重试 5 次（`LOGIN_RETRIES`），每次间隔 3 秒（`LOGIN_RETRY_DELAY`）。实测在第 3 次尝试前后成功，`login` 整体耗时约 35 秒。
 
@@ -124,8 +132,8 @@ $env:DRY_RUN = '1'; .\guet_drcom.ps1 login
 macOS / Linux：
 
 ```bash
-./guet_drcom.sh disable        # 移除 crontab
-rm -f .env guet_drcom.log      # 删除配置与日志
+./guet_drcom.sh disable                    # 移除 crontab
+rm -rf .env .env.lock guet_drcom.log*      # 删除配置、锁与日志
 ```
 
 Windows：双击 `guet_drcom.bat` 选 disable，或运行：
@@ -134,7 +142,7 @@ Windows：双击 `guet_drcom.bat` 选 disable，或运行：
 powershell -ExecutionPolicy Bypass -File .\guet_drcom.ps1 disable
 ```
 
-然后删除 `guet_drcom.config.json` 与日志即可。
+然后删除 `guet_drcom.config.json`、`guet_drcom.config.json.lock` 与日志（`guet_drcom.log*`）即可。`disable` 本身已经会移除计划任务、隐藏启动器和残留的锁目录。
 
 ---
 

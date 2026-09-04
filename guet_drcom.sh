@@ -18,6 +18,16 @@ LOGIN_RETRIES=${LOGIN_RETRIES:-5}
 LOGIN_RETRY_DELAY=${LOGIN_RETRY_DELAY:-3}
 DRY_RUN=${DRY_RUN:-0}
 AUTO_LOG=${AUTO_LOG:-"$SCRIPT_DIR/guet_drcom.log"}
+# cron 每分钟追加一次；持续掉线时每次写约 20 行，超过此字节数轮转为 .1
+AUTO_LOG_MAX=${AUTO_LOG_MAX:-1048576}
+
+# cron 的 PATH 与登录 shell 不同，auto 时按这份 PATH 校验依赖
+CRON_PATH='/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
+CRON_TAG='# guet_drcom-auto'
+# check 的自我互斥锁；同一配置文件即同一账号，故由配置文件路径派生
+LOCK_DIR="${CONFIG_FILE}.lock"
+# 持有者进程已消失、或持锁超过此秒数，即视为崩溃残留，可被抢占
+LOCK_STALE=${LOCK_STALE:-600}
 
 CARRIER_NAMES=("校园网" "中国移动" "中国联通" "中国电信" "中国广电")
 CARRIER_SUFFIXES=("" "@cmcc" "@unicom" "@telecom" "@glgd")
@@ -71,6 +81,17 @@ fail() {
     exit 1
 }
 
+# 检测与删除必须用同一口径，否则行尾多一个空格或 CR（手动编辑过、
+# 或 crontab 来自 Windows）就会一边报「已启用」、一边删不掉：auto 重复
+# 追加任务，disable 谎报已关闭。两者都用 grep -F 的子串语义。
+cron_has_tag() {
+    grep -Fq -- "$CRON_TAG"
+}
+
+cron_without_tag() {
+    awk -v tag="$CRON_TAG" 'index($0, tag) == 0'
+}
+
 usage() {
     local init_status auto_status
 
@@ -82,7 +103,7 @@ usage() {
 
     auto_status='未启用'
     if command -v crontab >/dev/null 2>&1 \
-        && crontab -l 2>/dev/null | grep -Fq '# guet_drcom-auto'; then
+        && crontab -l 2>/dev/null | cron_has_tag; then
         auto_status='已启用'
     fi
 
@@ -290,13 +311,16 @@ send_logout() {
     fi
 }
 
+# $1 进度标签，$2 最大尝试次数。成功返回 0，失败返回 1 而不终止脚本，
+# 由调用方决定接下来是「注销后重来」还是直接报错退出
 send_login() {
+    local label_prefix=$1 retries=$2
     local attempt=1 cache_buster response compact label
 
     while :; do
         cache_buster=$(date +%s)
-        label='[2/2]'
-        ((attempt == 1)) || label="[2/2 第 $attempt 次]"
+        label=$label_prefix
+        ((attempt == 1)) || label="${label_prefix%]} 第 $attempt 次]"
         ui_step "$label" '正在提交登录认证…'
         # --noproxy '*': 校园认证须直连门户，避免 http_proxy / 系统代理劫持
         # curl 失败（多为超时）不直接中断脚本，交由下面的重试逻辑处理
@@ -329,16 +353,22 @@ send_login() {
         # 要求 1 后非数字，避免 "result":10 / 12 等误判为成功
         if [[ $compact =~ \"result\":1([^0-9]|$) ]]; then
             ui_success '登录成功'
-            return
+            return 0
         fi
 
-        ((attempt < LOGIN_RETRIES)) || break
+        ((attempt < retries)) || return 1
         ui_warning "本次未登录成功，${LOGIN_RETRY_DELAY}s 后重试（注销后首次认证常需等待）"
         sleep "$LOGIN_RETRY_DELAY"
         attempt=$((attempt + 1))
     done
+}
 
-    fail "登录失败，${LOGIN_RETRIES} 次尝试均未返回 result=1"
+# check 与 login 共用的完整重连流程：注销 → 等待缓冲 → 按完整重试次数登录
+logout_then_login() {
+    send_logout "$1"
+    [[ $LOGOUT_DELAY == 0 ]] || sleep "$LOGOUT_DELAY"
+    send_login "$2" "$LOGIN_RETRIES" \
+        || fail "登录失败，${LOGIN_RETRIES} 次尝试均未返回 result=1"
 }
 
 print_network() {
@@ -375,9 +405,45 @@ login_command() {
     fi
 
     command -v curl >/dev/null 2>&1 || fail "找不到 curl 命令"
-    send_logout '[1/2]'
-    [[ $LOGOUT_DELAY == 0 ]] || sleep "$LOGOUT_DELAY"
-    send_login
+    # 手动 login 总是先注销，确保清掉服务端可能残留的旧会话
+    logout_then_login '[1/2]' '[2/2]'
+}
+
+# cron 每分钟触发一次，而单次 check 最坏要跑两三分钟（登录重试到底）。
+# 不互斥的话，后一个实例的 logout 会拆掉前一个正在建立的会话，双方都失败，
+# 而每分钟又叠加一个新实例，形成越等越连不上的死循环。
+acquire_lock() {
+    local holder='' started=0 now
+
+    now=$(date +%s)
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        # 2>/dev/null 必须写在输入重定向之前：否则 pid 文件不存在时（断电留下
+        # 空锁目录），重定向失败的报错会先泄漏到 stderr，污染 auto 日志
+        read -r holder started 2>/dev/null <"$LOCK_DIR/pid" || true
+        # 锁文件可能因断电等原因只写了一半，非数字时按最早时间处理
+        [[ $started =~ ^[0-9]+$ ]] || started=0
+        # 持有者仍在运行且未超时就让位，否则按崩溃/断电的残留锁抢占
+        if [[ $holder =~ ^[0-9]+$ ]] && kill -0 "$holder" 2>/dev/null \
+            && ((now - started < LOCK_STALE)); then
+            return 1
+        fi
+        rm -rf -- "$LOCK_DIR"
+        mkdir "$LOCK_DIR" 2>/dev/null || return 1
+    fi
+
+    printf '%s %s\n' "$$" "$now" >"$LOCK_DIR/pid"
+    trap 'rm -rf -- "$LOCK_DIR"' EXIT
+}
+
+# 本次输出已被 cron 重定向到 AUTO_LOG，轮转后本轮仍写进旧 inode（即 .1），
+# 下一次 cron 才会打开新文件；放在最前面做即可，不影响正确性
+rotate_auto_log() {
+    local size
+
+    [[ -f $AUTO_LOG ]] || return 0
+    size=$(wc -c <"$AUTO_LOG" 2>/dev/null || echo 0)
+    ((size > AUTO_LOG_MAX)) || return 0
+    mv -f -- "$AUTO_LOG" "$AUTO_LOG.1" 2>/dev/null || true
 }
 
 check_command() {
@@ -386,25 +452,82 @@ check_command() {
     command -v curl >/dev/null 2>&1 || fail "找不到 curl 命令"
     command -v iconv >/dev/null 2>&1 || fail "找不到 iconv 命令"
 
-    if page=$(curl --silent --show-error \
+    rotate_auto_log
+    if ! acquire_lock; then
+        printf '[%s] 上一轮 check 仍在运行，跳过本次。\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+        return
+    fi
+
+    # iconv -c 丢弃非法字节继续转换，并且一律忽略退出码：响应被 --max-time
+    # 截断时 -c 仍会返回 1，若让它参与判断（叠加 pipefail），页面里明明有
+    # 「注销页」也会被判成离线，进而把一个健康的会话注销掉
+    page=$(curl --silent --show-error \
         --noproxy '*' \
         --connect-timeout 5 \
         --max-time 8 \
-        "$STATUS_URL" 2>/dev/null | iconv -f GBK -t UTF-8 2>/dev/null) \
-        && [[ $page == *'注销页'* ]]; then
+        "$STATUS_URL" 2>/dev/null | iconv -c -f GBK -t UTF-8 2>/dev/null) || true
+    if [[ $page == *'注销页'* ]]; then
         return
     fi
 
     printf '[%s] 未检测到“注销页”，开始重新登录。\n' "$(date '+%Y-%m-%d %H:%M:%S')"
-    login_command
+    ui_header '自动重连'
+    load_config
+    print_network
+    ui_value '登录账号' "$DRCOM_ACCOUNT"
+
+    if [[ $DRY_RUN == 1 ]]; then
+        ui_warning 'DRY_RUN=1，未发送 logout/login 请求'
+        return
+    fi
+
+    # 状态探测仍可能误判（门户抖动、响应超时），所以先只试一次直接登录：
+    # 会话其实还在的话这次多半直接成功，不会动到它；即便门户拒绝，也只是退回
+    # 下面的注销重连，不比原来更差。
+    if send_login '[直接登录]' 1; then
+        return
+    fi
+    logout_then_login '[注销]' '[重新登录]'
+}
+
+# macOS 的 TCC 会拦住 cron 读取 ~/Desktop、~/Documents、~/Downloads 下的文件，
+# 症状是定时任务静默失效、日志一直没有新内容
+warn_macos_tcc() {
+    local protected=1
+
+    [[ $(uname -s) == Darwin ]] || return 0
+    # 该文件系统默认大小写不敏感，PWD 里的大小写未必与真实目录名一致
+    shopt -s nocasematch
+    case $SCRIPT_DIR/ in
+        "$HOME"/Desktop/*|"$HOME"/Documents/*|"$HOME"/Downloads/*) protected=0 ;;
+    esac
+    shopt -u nocasematch
+    ((protected == 0)) || return 0
+
+    ui_warning "本项目位于 macOS 受隐私保护的目录：$SCRIPT_DIR"
+    ui_warning '若日志长期没有新内容，请在「系统设置 → 隐私与安全性 → 完全磁盘'
+    ui_warning '访问权限」中添加 /usr/sbin/cron，或把项目移到该限制之外的目录。'
 }
 
 auto_command() {
-    local existing filtered cron_line
+    local existing filtered cron_line tool
     local script_quoted config_quoted log_quoted
 
     [[ -f $CONFIG_FILE ]] || fail "找不到 ${CONFIG_FILE}，请先运行 $(basename "$0") init"
     command -v crontab >/dev/null 2>&1 || fail "找不到 crontab 命令"
+
+    # cron 的 PATH 比登录 shell 窄（Homebrew 常在 /opt/homebrew/bin），故按 cron
+    # 实际使用的 PATH 校验；否则终端里跑得通，而定时任务每分钟静默失败一次。
+    # 子 shell 内 hash -r 清掉命令缓存，避免拿登录 shell 的缓存路径误判存在。
+    for tool in curl iconv; do
+        (PATH=$CRON_PATH; hash -r; command -v "$tool" >/dev/null 2>&1) \
+            || fail "cron 的 PATH（${CRON_PATH}）中找不到 ${tool}，请将其装入上述目录之一"
+    done
+
+    # crontab 会把命令中的 % 转成换行，把 cron 行拆坏；%q 并不转义它
+    case $SCRIPT_PATH$CONFIG_FILE$AUTO_LOG in
+        *%*) fail "路径含 % 字符，crontab 无法正确处理，请改用不含 % 的路径" ;;
+    esac
 
     umask 077
     : >>"$AUTO_LOG"
@@ -413,10 +536,10 @@ auto_command() {
     printf -v script_quoted '%q' "$SCRIPT_PATH"
     printf -v config_quoted '%q' "$CONFIG_FILE"
     printf -v log_quoted '%q' "$AUTO_LOG"
-    cron_line="* * * * * PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin GUET_DRCOM_ENV=$config_quoted $script_quoted check >> $log_quoted 2>&1 # guet_drcom-auto"
+    cron_line="* * * * * PATH=$CRON_PATH GUET_DRCOM_ENV=$config_quoted $script_quoted check >> $log_quoted 2>&1 $CRON_TAG"
 
     existing=$(crontab -l 2>/dev/null || true)
-    filtered=$(awk '!/# guet_drcom-auto$/' <<<"$existing")
+    filtered=$(cron_without_tag <<<"$existing")
     {
         [[ -z $filtered ]] || printf '%s\n' "$filtered"
         printf '%s\n' "$cron_line"
@@ -427,6 +550,7 @@ auto_command() {
     ui_value '配置文件' "$CONFIG_FILE"
     ui_value '日志文件' "$AUTO_LOG"
     ui_value '查看任务' 'crontab -l'
+    warn_macos_tcc
 }
 
 disable_command() {
@@ -435,15 +559,20 @@ disable_command() {
     command -v crontab >/dev/null 2>&1 || fail "找不到 crontab 命令"
     existing=$(crontab -l 2>/dev/null || true)
 
-    if ! grep -Fq '# guet_drcom-auto' <<<"$existing"; then
+    if ! cron_has_tag <<<"$existing"; then
         ui_warning '自动重连任务尚未启用，无需移除'
         return
     fi
 
-    filtered=$(awk '!/# guet_drcom-auto$/' <<<"$existing")
+    filtered=$(cron_without_tag <<<"$existing")
     {
         [[ -z $filtered ]] || printf '%s\n' "$filtered"
     } | crontab -
+
+    # 正在运行的 check 会自行清理；这里只清掉崩溃/断电留下的残留锁目录
+    if [[ -d $LOCK_DIR ]]; then
+        rm -rf -- "$LOCK_DIR"
+    fi
 
     ui_header '自动重连'
     ui_success '定时任务已关闭，其他 cron 任务未修改'

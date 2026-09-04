@@ -26,6 +26,7 @@
       * 配置文件使用 JSON 格式（默认 guet_drcom.config.json）。
       * 密码使用 DPAPI 加密存储（仅生成它的 Windows 用户在本机可解密）。
       * 自动重连使用「计划任务」，而非 crontab。
+      * 在线检测用 .NET 的 GBK 解码，无需外部 iconv。
 #>
 
 [CmdletBinding()]
@@ -73,9 +74,15 @@ $LoginRetries    = if ($env:LOGIN_RETRIES)     { [int]$env:LOGIN_RETRIES }     e
 $LoginRetryDelay = if ($env:LOGIN_RETRY_DELAY) { [int]$env:LOGIN_RETRY_DELAY } else { 3 }
 $DryRun      = if ($env:DRY_RUN)      { $env:DRY_RUN }      else { '0' }
 $AutoLog     = if ($env:AUTO_LOG)     { $env:AUTO_LOG }     else { Join-Path $ScriptDir 'guet_drcom.log' }
+# 计划任务每分钟追加一次；持续掉线时每次写约 20 行，超过此字节数轮转为 .1
+$AutoLogMax  = if ($env:AUTO_LOG_MAX) { [int]$env:AUTO_LOG_MAX } else { 1048576 }
 
 $TaskName = 'GUET_DrCOM_AutoReconnect'
 $HiddenLauncher = Join-Path $ScriptDir 'guet_drcom_hidden.vbs'
+# check 的自我互斥锁；同一配置文件即同一账号，故由配置文件路径派生
+$LockDir = "$ConfigFile.lock"
+# 持有者进程已消失、或持锁超过此秒数，即视为崩溃残留，可被抢占
+$LockStale = if ($env:LOCK_STALE) { [int]$env:LOCK_STALE } else { 600 }
 
 $CarrierNames    = @('校园网', '中国移动', '中国联通', '中国电信', '中国广电')
 $CarrierSuffixes = @('', '@cmcc', '@unicom', '@telecom', '@glgd')
@@ -89,6 +96,7 @@ $script:SelectedCarrierName  = ''
 $script:SelectedCarrierSuffix = ''
 $script:DrcomAccount         = ''
 $script:DrcomPassword        = ''
+$script:LockAcquired         = $false
 
 # --------------------------------------------------------------------------
 # 控制台初始化与颜色
@@ -212,6 +220,75 @@ function Protect-File {
     } catch {
         Write-Warn "无法收紧 $Path 的访问权限：$($_.Exception.Message)"
     }
+}
+
+# --------------------------------------------------------------------------
+# check 的自我互斥与日志轮转
+# --------------------------------------------------------------------------
+# 计划任务的 MultipleInstances IgnoreNew 只挡得住同一任务的重入，挡不住
+# 「手动运行 + 定时任务」撞车；而单次 check 最坏要跑两三分钟（登录重试到底），
+# 撞车时后一个的 logout 会拆掉前一个正在建立的会话，双方都失败。
+function Enter-Lock {
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $pidFile = Join-Path $LockDir 'pid'
+
+    try {
+        New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop | Out-Null
+    } catch {
+        $holder = 0
+        $started = [long]0
+        try {
+            $parts = (Get-Content -LiteralPath $pidFile -TotalCount 1 -ErrorAction Stop) -split '\s+'
+            # 锁文件可能因断电只写了一半，解析不出就按 0 处理（即当作已过期）
+            if ($parts.Count -ge 1) { [void][int]::TryParse($parts[0], [ref]$holder) }
+            if ($parts.Count -ge 2) { [void][long]::TryParse($parts[1], [ref]$started) }
+        } catch { }
+
+        $alive = $false
+        if ($holder -gt 0) { $alive = [bool](Get-Process -Id $holder -ErrorAction SilentlyContinue) }
+        # 持有者仍在运行且未超时就让位，否则按崩溃/断电的残留锁抢占
+        if ($alive -and ($now - $started) -lt $LockStale) { return $false }
+
+        Remove-Item -LiteralPath $LockDir -Recurse -Force -ErrorAction SilentlyContinue
+        try {
+            New-Item -ItemType Directory -Path $LockDir -ErrorAction Stop | Out-Null
+        } catch {
+            return $false
+        }
+    }
+
+    Set-Content -LiteralPath $pidFile -Value "$PID $now" -Encoding ASCII
+    $script:LockAcquired = $true
+    return $true
+}
+
+function Exit-Lock {
+    if (-not $script:LockAcquired) { return }
+    Remove-Item -LiteralPath $LockDir -Recurse -Force -ErrorAction SilentlyContinue
+    $script:LockAcquired = $false
+}
+
+# 在 *>> 重定向打开日志之前调用；PowerShell 的重定向逐次追加，轮转后
+# 后续输出会直接落到新建的日志里
+function Limit-AutoLog {
+    param([string]$Path)
+
+    if ([string]::IsNullOrEmpty($Path)) { return }
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    try {
+        if ((Get-Item -LiteralPath $Path).Length -le $AutoLogMax) { return }
+        Move-Item -LiteralPath $Path -Destination "$Path.1" -Force -ErrorAction Stop
+    } catch { }
+}
+
+# 门户页面是 GBK。取不到该编码时返回 $null，由调用方判定「检测不可用」，
+# 绝不能退回 UTF-8 去猜：那样解出来全是乱码，「注销页」永远匹配不上
+function Get-GbkEncoding {
+    try {
+        # PowerShell 7 / .NET Core 需要先注册代码页提供程序才能用 GBK
+        [System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance)
+    } catch { }
+    try { return [System.Text.Encoding]::GetEncoding(936) } catch { return $null }
 }
 
 # --------------------------------------------------------------------------
@@ -501,10 +578,14 @@ function Send-Logout {
     }
 }
 
+# $LabelPrefix 进度标签，$Retries 最大尝试次数。成功返回 $true，失败返回 $false
+# 而不终止脚本，由调用方决定接下来是「注销后重来」还是直接报错退出
 function Send-Login {
+    param([string]$LabelPrefix, [int]$Retries)
+
     for ($attempt = 1; ; $attempt++) {
         $cacheBuster = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-        $label = if ($attempt -eq 1) { '[2/2]' } else { "[2/2 第 $attempt 次]" }
+        $label = if ($attempt -eq 1) { $LabelPrefix } else { "$($LabelPrefix -replace '\]$', '') 第 $attempt 次]" }
         Write-Step $label '正在提交登录认证…'
         $pairs = @(
             @('callback', 'dr1004'),
@@ -533,13 +614,23 @@ function Send-Login {
         # 要求 1 后非数字，避免 "result":10 / 12 等误判为成功
         if ($compact -match '"result":1([^0-9]|$)') {
             Write-Success '登录成功'
-            return
+            return $true
         }
-        if ($attempt -ge $LoginRetries) { break }
+        if ($attempt -ge $Retries) { return $false }
         Write-Warn "本次未登录成功，${LoginRetryDelay}s 后重试（注销后首次认证常需等待）"
         Start-Sleep -Seconds $LoginRetryDelay
     }
-    Fail "登录失败，$LoginRetries 次尝试均未返回 result=1"
+}
+
+# check 与 login 共用的完整重连流程：注销 → 等待缓冲 → 按完整重试次数登录
+function Invoke-LogoutThenLogin {
+    param([string]$LogoutLabel, [string]$LoginLabel)
+
+    Send-Logout $LogoutLabel
+    if ($LogoutDelay -ne 0) { Start-Sleep -Seconds $LogoutDelay }
+    if (-not (Send-Login $LoginLabel $LoginRetries)) {
+        Fail "登录失败，$LoginRetries 次尝试均未返回 result=1"
+    }
 }
 
 # --------------------------------------------------------------------------
@@ -571,44 +662,65 @@ function Invoke-Login {
         return
     }
 
-    Send-Logout '[1/2]'
-    if ($LogoutDelay -ne 0) { Start-Sleep -Seconds $LogoutDelay }
-    Send-Login
+    # 手动 login 总是先注销，确保清掉服务端可能残留的旧会话
+    Invoke-LogoutThenLogin '[1/2]' '[2/2]'
 }
 
 function Invoke-Check {
-    # 注册代码页编码提供程序（PowerShell 7 / .NET Core 需要，才能使用 GBK）
-    try {
-        [System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance)
-    } catch { }
-    $gbk = $null
-    try { $gbk = [System.Text.Encoding]::GetEncoding(936) } catch { }
-
-    $online = $false
-    try {
-        Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue
-        # UseProxy=$false：状态检测同样须直连，避免代理返回非门户页面导致误判
-        $handler = New-Object System.Net.Http.HttpClientHandler
-        $handler.UseProxy = $false
-        $client = New-Object System.Net.Http.HttpClient($handler)
-        $client.Timeout = [TimeSpan]::FromSeconds(8)
-        try {
-            $bytes = $client.GetByteArrayAsync($StatusUrl).GetAwaiter().GetResult()
-        } finally {
-            $client.Dispose()
-            $handler.Dispose()
-        }
-        $page = if ($gbk) { $gbk.GetString($bytes) } else { [System.Text.Encoding]::UTF8.GetString($bytes) }
-        if ($page -like '*注销页*') { $online = $true }
-    } catch {
-        $online = $false
+    if (-not (Enter-Lock)) {
+        Write-Host ("[{0}] 上一轮 check 仍在运行，跳过本次。" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
+        return
     }
 
-    if ($online) { return }
+    try {
+        # 取不到 GBK 就跳过本轮，不做任何重连动作。此前会退回 UTF-8 解码，
+        # 解出来是乱码，「注销页」永远匹配不上，结果每分钟强制注销重登一次。
+        $gbk = Get-GbkEncoding
+        if (-not $gbk) {
+            Write-Host ("[{0}] 无法加载 GBK(936) 编码，跳过本次在线检测（不做重连）。" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
+            return
+        }
 
-    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    Write-Host "[$timestamp] 未检测到`"注销页`"，开始重新登录。"
-    Invoke-Login
+        $online = $false
+        try {
+            Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue
+            # UseProxy=$false：状态检测同样须直连，避免代理返回非门户页面导致误判
+            $handler = New-Object System.Net.Http.HttpClientHandler
+            $handler.UseProxy = $false
+            $client = New-Object System.Net.Http.HttpClient($handler)
+            $client.Timeout = [TimeSpan]::FromSeconds(8)
+            try {
+                $bytes = $client.GetByteArrayAsync($StatusUrl).GetAwaiter().GetResult()
+            } finally {
+                $client.Dispose()
+                $handler.Dispose()
+            }
+            if ($gbk.GetString($bytes) -like '*注销页*') { $online = $true }
+        } catch {
+            $online = $false
+        }
+
+        if ($online) { return }
+
+        Write-Host ("[{0}] 未检测到`"注销页`"，开始重新登录。" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
+        Write-Header '自动重连'
+        Import-Config
+        Show-Network
+        Write-Value '登录账号' $script:DrcomAccount
+
+        if ($DryRun -eq '1') {
+            Write-Warn 'DRY_RUN=1，未发送 logout/login 请求'
+            return
+        }
+
+        # 状态探测仍可能误判（门户抖动、响应超时），所以先只试一次直接登录：
+        # 会话其实还在的话这次多半直接成功，不会动到它；即便门户拒绝，也只是
+        # 退回下面的注销重连，不比原来更差。
+        if (Send-Login '[直接登录]' 1) { return }
+        Invoke-LogoutThenLogin '[注销]' '[重新登录]'
+    } finally {
+        Exit-Lock
+    }
 }
 
 function Invoke-Auto {
@@ -617,6 +729,11 @@ function Invoke-Auto {
     }
     if (-not (Get-Command Register-ScheduledTask -ErrorAction SilentlyContinue)) {
         Fail '找不到计划任务相关命令（ScheduledTasks 模块），无法启用自动重连'
+    }
+    # 与 bash 版按 cron 的 PATH 校验依赖同理：GBK 取不到时 check 判断不了在线
+    # 状态，在这里就拦下，而不是等定时任务每分钟空跑一次
+    if (-not (Get-GbkEncoding)) {
+        Fail '无法加载 GBK(936) 编码，check 将无法判断在线状态；请确认 .NET 运行时完整'
     }
 
     # 准备日志文件并收紧权限
@@ -691,6 +808,15 @@ End Function
         Fail "注册计划任务失败（如为权限问题，请以管理员身份运行 PowerShell 重试）：$($_.Exception.Message)"
     }
 
+    # 安全软件有时会在注册后回删任务或 vbs，这里立刻回读一次确认真的落地了，
+    # 免得用户以为已开启、实际每分钟都没跑（症状就是日志一直没有新内容）
+    if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
+        Fail "计划任务注册后回读不到，可能被安全软件拦截，请排查后重试"
+    }
+    if (-not (Test-Path -LiteralPath $HiddenLauncher)) {
+        Fail "隐藏启动器 $HiddenLauncher 在注册后已消失，可能被安全软件删除"
+    }
+
     Write-Header '自动重连'
     Write-Success '计划任务已启用，每分钟检查一次'
     Write-Value '任务名称' $TaskName
@@ -725,6 +851,11 @@ function Invoke-Disable {
         }
     }
 
+    # 正在运行的 check 会自行清理；这里只清掉崩溃/断电留下的残留锁目录
+    if (Test-Path -LiteralPath $LockDir) {
+        Remove-Item -LiteralPath $LockDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
     Write-Header '自动重连'
     Write-Success '计划任务已关闭，其他计划任务未修改'
 }
@@ -757,6 +888,8 @@ Initialize-Console
 if ([string]::IsNullOrEmpty($LogFile)) {
     Invoke-Main
 } else {
+    # 轮转要在重定向打开日志之前做，否则本轮输出会落进刚被改名的旧文件
+    Limit-AutoLog $LogFile
     # PowerShell 5.1 的 *>> 同时捕获成功、错误、警告和 Write-Host 信息流。
     # 重定向底层是 Out-File，PS 5.1 默认写 UTF-16LE；统一为 UTF-8，
     # 避免与 pwsh 7（默认 UTF-8）混用时同一日志文件出现两种编码。
