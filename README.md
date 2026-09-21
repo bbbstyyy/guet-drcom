@@ -2,7 +2,7 @@
 
 桂林电子科技大学（GUET）校园网 Dr.COM 认证脚本，基于 miwifi 分支适配 **ZTE ONU / 光猫上的老版本 BusyBox ash**。
 
-本分支不需要 Bash，也不依赖 `iconv`，并额外避免了部分 ZTE 老 BusyBox 中缺失的 `dirname` 与 `command -v`。脚本会从设备自身的路由表中自动识别通往认证服务器的 WAN 接口、IPv4 和 MAC，并支持掉线检测与 cron 自动重连。
+本分支不需要 Bash，也不依赖 `iconv`，并额外避免了部分 ZTE 老 BusyBox 中缺失的 `dirname` 与 `command -v`。脚本会从设备自身的路由表中自动识别通往认证服务器的 WAN 接口、IPv4 和 MAC，并支持掉线检测与后台循环自动重连。
 
 > ZTE 兼容目标：BusyBox ash 1.17.x 一类老固件环境；已针对缺失 `dirname`、缺失 `command` builtin 的情况做兼容。
 
@@ -49,10 +49,7 @@ root@XiaoQiang:~#
 - `sed`
 - `tr`
 
-启用自动重连还需要：
-
-- `crontab`
-- `crond`
+自动重连不依赖 `crontab` / `crond`，由脚本自身启动后台循环。
 
 不需要：
 
@@ -62,9 +59,9 @@ root@XiaoQiang:~#
 可先检查环境：
 
 ```sh
-for cmd in curl ip awk grep sed tr crontab crond; do
+for cmd in curl ip awk grep sed tr; do
     printf '%-10s : ' "$cmd"
-    command -v "$cmd" 2>/dev/null || echo MISSING
+    type "$cmd" 2>/dev/null || echo MISSING
 done
 ```
 
@@ -204,24 +201,30 @@ echo $?
 ./guet_drcom.sh auto
 ```
 
-脚本会保留路由器已有的 cron 项，只添加自己的任务：
+ZTE 分支不依赖 cron。脚本会启动一个后台循环，默认每 60 秒执行一次 `check`。
 
-```text
-# guet_drcom-auto
-```
-
-默认每分钟执行一次在线检测。
-
-查看任务：
+查看状态：
 
 ```sh
-crontab -l | grep guet_drcom
+./guet_drcom.sh status
 ```
 
 查看日志：
 
 ```sh
-tail -f /usercfg/guet-drcom/guet_drcom.log
+tail -f /tmp/guet_drcom.log
+```
+
+默认 PID 文件：
+
+```text
+/tmp/guet_drcom.pid
+```
+
+可通过环境变量修改检测间隔，例如每 120 秒检查一次：
+
+```sh
+AUTO_INTERVAL=120 ./guet_drcom.sh auto
 ```
 
 ### 6. 关闭自动重连
@@ -230,7 +233,7 @@ tail -f /usercfg/guet-drcom/guet_drcom.log
 ./guet_drcom.sh disable
 ```
 
-只移除带 `# guet_drcom-auto` 标记的任务，不修改路由器原有的其他 cron 项。
+脚本会读取 PID 文件并停止对应的后台循环。
 
 ---
 
@@ -242,8 +245,9 @@ tail -f /usercfg/guet-drcom/guet_drcom.log
 | `login` | 自动获取 WAN 网络信息，注销旧会话后重新登录 |
 | `logout` | 注销当前会话 |
 | `check` | 检查在线状态，掉线时自动登录 |
-| `auto` | 添加每分钟执行一次的自动检测 / 重连 cron |
-| `disable` | 删除本脚本添加的自动重连 cron |
+| `auto` | 启动后台自动检测 / 重连循环 |
+| `status` | 查看后台自动重连状态 |
+| `disable` | 停止后台自动重连循环 |
 | `diag` | 显示到认证服务器的路由、默认路由和 IPv4 地址 |
 | `help` | 显示帮助与当前状态 |
 
@@ -282,7 +286,9 @@ tail -f /usercfg/guet-drcom/guet_drcom.log
 | `LOGOUT_URL` | 注销接口 |
 | `LOGOUT_DELAY` | 注销后到登录前的等待时间，默认 6 秒 |
 | `DRY_RUN` | 设为 `1` 时只检测网络信息，不发送登录 / 注销请求 |
-| `AUTO_LOG` | 自动重连日志路径 |
+| `AUTO_LOG` | 自动重连日志路径，默认 `/tmp/guet_drcom.log` |
+| `AUTO_PID` | 后台循环 PID 文件，默认 `/tmp/guet_drcom.pid` |
+| `AUTO_INTERVAL` | 自动检测间隔秒数，默认 `60` |
 | `GUET_DRCOM_ENV` | 自定义配置文件路径 |
 | `INTERFACE` | 手动覆盖自动检测到的接口 |
 | `CLIENT_IP` | 手动覆盖 IPv4 |
@@ -390,6 +396,8 @@ rm -rf /usercfg/guet-drcom
 - 使用 shell 参数展开计算脚本目录，不依赖 `dirname`
 - 使用 `type` 检测命令，不依赖 `command -v`
 - 默认建议将脚本和 `.env` 放在 `/usercfg/guet-drcom`
-- 建议将自动重连日志放在 `/tmp/guet_drcom.log`，避免频繁写 Flash
+- 自动重连不依赖 `crontab` / `crond`
+- 自动重连日志默认放在 `/tmp/guet_drcom.log`，避免频繁写 Flash
+- PID 文件默认放在 `/tmp/guet_drcom.pid`
 
-在 ZTE 上启用自动重连前，请先确认 `crontab` / `crond` 是否存在，以及 cron 配置是否会跨重启保留。
+注意：后台循环本身不会跨设备重启。要实现光猫重启后自动启动，还需要结合 ZTE 固件的开机启动机制。
