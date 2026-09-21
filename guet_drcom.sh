@@ -1,7 +1,7 @@
 #!/bin/sh
-# GUET Dr.COM router edition
-# Target: BusyBox ash / OpenWrt-like router firmware
-# No Bash-only syntax and no iconv dependency.
+# GUET Dr.COM ZTE ONU edition
+# Target: old BusyBox ash environments used by ZTE ONU firmware.
+# Avoids Bash-only syntax, dirname, command -v, and iconv dependencies.
 
 SERVER_IP=${SERVER_IP:-10.0.1.5}
 STATUS_URL=${STATUS_URL:-http://${SERVER_IP}/}
@@ -10,9 +10,21 @@ LOGIN_URL=${LOGIN_URL:-http://${SERVER_IP}/drcom/login}
 LOGOUT_DELAY=${LOGOUT_DELAY:-1}
 DRY_RUN=${DRY_RUN:-0}
 
-SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" 2>/dev/null && pwd)
+SCRIPT_PATH=$0
+case "$SCRIPT_PATH" in
+    */*)
+        SCRIPT_DIR=${SCRIPT_PATH%/*}
+        SCRIPT_NAME=${SCRIPT_PATH##*/}
+        ;;
+    *)
+        SCRIPT_DIR=.
+        SCRIPT_NAME=$SCRIPT_PATH
+        ;;
+esac
+
+SCRIPT_DIR=$(CDPATH= cd "$SCRIPT_DIR" 2>/dev/null && pwd)
 [ -n "$SCRIPT_DIR" ] || SCRIPT_DIR=.
-SCRIPT_PATH="$SCRIPT_DIR/$(basename "$0")"
+SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_NAME"
 CONFIG_FILE=${GUET_DRCOM_ENV:-"$SCRIPT_DIR/.env"}
 AUTO_LOG=${AUTO_LOG:-"$SCRIPT_DIR/guet_drcom.log"}
 
@@ -34,7 +46,7 @@ info() {
 }
 
 require_cmd() {
-    command -v "$1" >/dev/null 2>&1 || fail "找不到命令: $1"
+    type "$1" >/dev/null 2>&1 || fail "找不到命令: $1"
 }
 
 usage() {
@@ -42,7 +54,7 @@ usage() {
     auto_status='未启用'
 
     [ -f "$CONFIG_FILE" ] && init_status='已完成'
-    if command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -Fq '# guet_drcom-auto'; then
+    if type crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -Fq '# guet_drcom-auto'; then
         auto_status='已启用'
     fi
 
@@ -50,14 +62,14 @@ usage() {
 GUET Dr.COM 路由器版 (BusyBox ash)
 
 用法:
-  $(basename "$0") init       初始化学号、密码、运营商
-  $(basename "$0") login      注销旧会话并重新登录
-  $(basename "$0") logout     注销当前会话
-  $(basename "$0") check      检测在线状态，掉线则重连
-  $(basename "$0") auto       每分钟自动检测与重连
-  $(basename "$0") disable    移除自动重连 cron
-  $(basename "$0") diag       查看到认证服务器的路由/接口信息
-  $(basename "$0") help       显示帮助
+  $SCRIPT_NAME init       初始化学号、密码、运营商
+  $SCRIPT_NAME login      注销旧会话并重新登录
+  $SCRIPT_NAME logout     注销当前会话
+  $SCRIPT_NAME check      检测在线状态，掉线则重连
+  $SCRIPT_NAME auto       每分钟自动检测与重连
+  $SCRIPT_NAME disable    移除自动重连 cron
+  $SCRIPT_NAME diag       查看到认证服务器的路由/接口信息
+  $SCRIPT_NAME help       显示帮助
 
 状态:
   init: $init_status
@@ -128,7 +140,7 @@ read_password() {
     password=''
     SAVED_STTY=''
 
-    if [ -t 0 ] && command -v stty >/dev/null 2>&1; then
+    if [ -t 0 ] && type stty >/dev/null 2>&1; then
         SAVED_STTY=$(stty -g 2>/dev/null || true)
     fi
 
@@ -201,7 +213,7 @@ config_get() {
 }
 
 load_config() {
-    [ -f "$CONFIG_FILE" ] || fail "找不到 $CONFIG_FILE，请先运行 $(basename "$0") init"
+    [ -f "$CONFIG_FILE" ] || fail "找不到 $CONFIG_FILE，请先运行 $SCRIPT_NAME init"
 
     DRCOM_ACCOUNT=$(config_get DRCOM_ACCOUNT)
     DRCOM_PASSWORD=$(config_get DRCOM_PASSWORD)
@@ -236,7 +248,7 @@ detect_network() {
     if [ -z "$interface" ] || [ -z "$client_ip" ]; then
         route_info=$(ip -4 route get "$SERVER_IP" 2>/dev/null || true)
         if [ -z "$route_info" ]; then
-            fail "当前没有到认证服务器 $SERVER_IP 的 IPv4 路由。请确认 WAN 已接入校园网；可运行 $(basename "$0") diag 查看。"
+            fail "当前没有到认证服务器 $SERVER_IP 的 IPv4 路由。请确认 WAN 已接入校园网；可运行 $SCRIPT_NAME diag 查看。"
         fi
 
         if [ -z "$interface" ]; then
@@ -443,7 +455,7 @@ safe_cron_path() {
 }
 
 auto_command() {
-    [ -f "$CONFIG_FILE" ] || fail "找不到 $CONFIG_FILE，请先运行 $(basename "$0") init"
+    [ -f "$CONFIG_FILE" ] || fail "找不到 $CONFIG_FILE，请先运行 $SCRIPT_NAME init"
     require_cmd crontab
 
     # Keeping paths shell-simple avoids depending on Bash-style %q quoting.
