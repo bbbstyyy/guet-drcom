@@ -1,144 +1,226 @@
-# GUET Dr.COM 校园网认证工具
+# GUET Dr.COM 路由器版
 
-桂林电子科技大学（GUET）校园网 Dr.COM 认证辅助脚本，支持自动登录、掉线检测与自动重连，覆盖 macOS/Linux 与 Windows。
+适用于 **MiWiFi / XiaoQiang / BusyBox ash** 环境的桂电 Dr.COM 校园网认证脚本。
 
-- **`guet_drcom.sh`** — macOS / Linux（bash），用 crontab 保活。
-- **`guet_drcom.ps1`** — Windows（PowerShell），用「计划任务」保活。
-- **`guet_drcom.bat`** — Windows 启动器：双击出菜单，免敲参数。
+本分支只保留路由器所需内容：
 
-两个版本认证流程一致，按平台选其一即可。
-
----
-
-## 运行示例
-
-以下为脚本运行的终端输出截图（macOS 终端风格）。
-
-> 说明：截图均以 `DRY_RUN=1`（干跑）模式生成，仅展示交互与输出格式，**不真实发送任何认证请求**；网络信息、账号均为模拟值。实际运行去掉 `DRY_RUN` 即可正常登录。
-
-<table>
-<tr>
-<td><b><code>./guet_drcom.sh help</code></b><br>查看帮助与当前状态<br><img src="docs/screenshot-help.png" width="100%" alt="help 运行截图" /></td>
-<td><b><code>DRY_RUN=1 ./guet_drcom.sh login</code></b><br>登录流程（干跑，不发请求）<br><img src="docs/screenshot-login.png" width="100%" alt="login 运行截图" /></td>
-</tr>
-<tr>
-<td><b><code>DRY_RUN=1 ./guet_drcom.sh logout</code></b><br>单独注销（干跑，不发请求）<br><img src="docs/screenshot-logout.png" width="100%" alt="logout 运行截图" /></td>
-<td><b><code>./guet_drcom.sh auto</code></b><br>启用每分钟自动检测与重连<br><img src="docs/screenshot-auto.png" width="100%" alt="auto 运行截图" /></td>
-</tr>
-</table>
-
----
-
-## 快速开始
-
-### macOS / Linux
-
-在脚本目录下：
-
-```bash
-./guet_drcom.sh init      # 初始化：填学号、密码、选运营商
-./guet_drcom.sh login     # 登录
-./guet_drcom.sh auto      # 开启每分钟自动检测与重连（推荐）
-./guet_drcom.sh disable   # 关闭自动重连
-./guet_drcom.sh help      # 查看帮助与状态
+```text
+.
+├── README.md
+├── guet_drcom.sh
+└── docs
+    └── help.jpg
 ```
 
-### Windows
+## 已验证环境
 
-**方式一（推荐）**：双击 `guet_drcom.bat`，按菜单数字选择。
+- 小米路由器 / XiaoQiang 固件
+- Linux 4.4.60
+- ARMv7
+- BusyBox ash 1.25.1
+- curl 7.79.1
+- crontab / crond
+- 无需 Bash
+- 无需 iconv
 
-**方式二**：在脚本目录打开 PowerShell：
+> 脚本使用 `#!/bin/sh`，针对 BusyBox ash 做了兼容处理。
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\guet_drcom.ps1 init
-powershell -ExecutionPolicy Bypass -File .\guet_drcom.ps1 login
-powershell -ExecutionPolicy Bypass -File .\guet_drcom.ps1 auto
+## 功能
+
+| 命令 | 说明 |
+| --- | --- |
+| `init` | 初始化学号、密码、运营商 |
+| `login` | 注销旧会话并重新登录 |
+| `logout` | 注销当前会话 |
+| `check` | 检测在线状态，掉线则重连 |
+| `auto` | 每分钟自动检测与重连 |
+| `disable` | 移除自动重连 cron |
+| `diag` | 查看认证服务器的路由和接口信息 |
+| `help` | 显示帮助 |
+
+![guet_drcom.sh help](docs/help.jpg)
+
+## 安装
+
+建议放在路由器的持久化目录，例如 `/data/guet-drcom`：
+
+```sh
+mkdir -p /data/guet-drcom
+cd /data/guet-drcom
+
+wget -O guet_drcom.sh \
+  https://raw.githubusercontent.com/bbbstyyy/guet-drcom/miwifi/guet_drcom.sh
+
+chmod 700 guet_drcom.sh
 ```
 
-> 若已设为允许本地脚本（`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`），可直接 `.\guet_drcom.ps1 login`。
+确认脚本可以运行：
 
----
+```sh
+./guet_drcom.sh help
+```
 
-## 命令一览
+## 使用
 
-| 命令 | 作用 |
-|------|------|
-| `init` | 交互式录入学号、密码、运营商，生成配置文件 |
-| `login` | 注销旧会话后重新登录 |
-| `logout` | 单独注销 |
-| `auto` | 注册定时任务，每分钟检测掉线并自动重连 |
-| `disable` | 移除自动重连任务 |
-| `check` | 检测是否在线，掉线则自动登录（供定时任务调用） |
-| `help` | 显示帮助与当前状态 |
+### 1. 初始化
 
-## 运营商
+```sh
+./guet_drcom.sh init
+```
 
-`init` 时用 ↑/↓ 或数字 1–5 选择，决定账号后缀：
+按提示输入：
+
+- 学号
+- 密码
+- 运营商
+
+运营商对应关系：
 
 | 选项 | 运营商 | 账号后缀 |
-|------|--------|----------|
-| 1 | 校园网 | （无） |
+| ---: | --- | --- |
+| 1 | 校园网 | 无 |
 | 2 | 中国移动 | `@cmcc` |
 | 3 | 中国联通 | `@unicom` |
 | 4 | 中国电信 | `@telecom` |
 | 5 | 中国广电 | `@glgd` |
 
----
+初始化后会在脚本目录生成：
 
-## 注意事项
-
-> **安全提示**：bash 版密码以明文存在 `.env`，务必 `chmod 600` 限本人访问；Windows 版用 DPAPI 加密，配置文件绑定本机当前用户，换用户或换电脑需重新 `init`。
-
-> 提示：Windows 版计划任务经 `wscript.exe` 隐藏启动，部分杀毒软件可能拦截；若 `auto` 启用后日志长期无新内容，可检查安全软件是否拦截了 `wscript.exe` 或删除了 `guet_drcom_hidden.vbs`。
-
-## 环境变量（可选）
-
-以下变量可覆盖默认值，两平台一致：
-
-`SERVER_IP`、`STATUS_URL`、`LOGIN_URL`、`LOGOUT_URL`、`LOGOUT_DELAY`、`DRY_RUN`、`AUTO_LOG`、`GUET_DRCOM_ENV`（配置文件路径），以及 `INTERFACE`/`CLIENT_IP`/`CLIENT_IPV6`/`CLIENT_MAC`（手动指定网络信息）。
-
-```powershell
-# 示例：只探测网络、不真正发请求
-$env:DRY_RUN = '1'; .\guet_drcom.ps1 login
+```text
+.env
 ```
 
----
+默认情况下即：
 
-## 卸载
-
-macOS / Linux：
-
-```bash
-./guet_drcom.sh disable        # 移除 crontab
-rm -f .env guet_drcom.log      # 删除配置与日志
+```text
+/data/guet-drcom/.env
 ```
 
-Windows：双击 `guet_drcom.bat` 选 disable，或运行：
+### 2. 检查校园网路由
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\guet_drcom.ps1 disable
+首次使用建议执行：
+
+```sh
+./guet_drcom.sh diag
 ```
 
-然后删除 `guet_drcom.config.json` 与日志即可。
+应能看到到认证服务器 `10.0.1.5` 的路由，例如：
 
----
+```text
+10.0.1.5 via 10.x.x.x dev eth0 src 10.x.x.x
+```
 
-## 支持作者
+如果出现：
 
-如果这个工具帮到了你，欢迎给项目点个 ⭐ Star，或请作者喝杯咖啡 ☕
+```text
+RTNETLINK answers: Network unreachable
+```
 
-<img src="qrcode.jpg" width="200" alt="二维码" />
+说明路由器当前没有到认证服务器的路由，请先检查 WAN 是否已正确接入校园网。
 
-本工具免费开源，你的支持是我持续维护的动力。
+### 3. 登录
 
----
+```sh
+./guet_drcom.sh login
+```
 
-## 许可证
+认证成功时，Dr.COM 返回内容中会包含：
 
-本项目采用 [MIT License](LICENSE) 许可。
+```text
+"result":1
+```
 
-## 关于作者
+并显示：
 
-本工具代码风格严格遵循 Andrej Karpathy 编码规范（极简主义），追求清晰、简洁、易维护。
+```text
+登录成功
+```
 
-**原作者**：bbbstyyy
+登录前脚本会先尝试注销旧会话。如果注销返回 `result=0`，但随后登录返回 `result=1`，不影响正常使用。
+
+### 4. 检查在线状态
+
+```sh
+./guet_drcom.sh check
+```
+
+- 在线：直接退出，返回成功状态。
+- 掉线：自动重新执行登录。
+- 无法路由到认证服务器：跳过本次认证并返回非零状态。
+
+脚本不依赖 `iconv`，可直接在精简 BusyBox 固件上检测 Dr.COM 在线状态。
+
+### 5. 开启自动重连
+
+```sh
+./guet_drcom.sh auto
+```
+
+脚本会向当前用户的 crontab 添加一条带有：
+
+```text
+# guet_drcom-auto
+```
+
+标记的任务，每分钟执行一次在线检测。
+
+查看任务：
+
+```sh
+crontab -l
+```
+
+查看日志：
+
+```sh
+tail -f /data/guet-drcom/guet_drcom.log
+```
+
+默认日志文件为：
+
+```text
+/data/guet-drcom/guet_drcom.log
+```
+
+### 6. 关闭自动重连
+
+```sh
+./guet_drcom.sh disable
+```
+
+只会移除带 `# guet_drcom-auto` 标记的 cron 项，不会删除路由器原有的其他定时任务。
+
+## 手动注销
+
+```sh
+./guet_drcom.sh logout
+```
+
+如果当前没有可注销的 Radius 会话，服务器可能返回：
+
+```text
+Radius注销失败！
+```
+
+这不代表后续登录一定会失败。
+
+## 文件说明
+
+| 文件 | 说明 |
+| --- | --- |
+| `guet_drcom.sh` | 路由器认证脚本 |
+| `.env` | 本地认证配置，运行 `init` 后生成 |
+| `guet_drcom.log` | 自动检测 / 重连日志 |
+| `docs/help.jpg` | 路由器实际运行截图 |
+
+## 安全提示
+
+`.env` 中包含认证账号和密码，并以明文形式保存在路由器本地。
+
+请确保：
+
+- 不要将 `.env` 上传或提交到公开仓库；
+- 不要把配置文件发送给他人；
+- 建议限制脚本目录和配置文件的访问权限。
+
+脚本通过 `init` 创建配置文件时会将权限设置为仅当前用户可读写。
