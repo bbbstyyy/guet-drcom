@@ -26,7 +26,9 @@ SCRIPT_DIR=$(CDPATH= cd "$SCRIPT_DIR" 2>/dev/null && pwd)
 [ -n "$SCRIPT_DIR" ] || SCRIPT_DIR=.
 SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_NAME"
 CONFIG_FILE=${GUET_DRCOM_ENV:-"$SCRIPT_DIR/.env"}
-AUTO_LOG=${AUTO_LOG:-"$SCRIPT_DIR/guet_drcom.log"}
+AUTO_LOG=${AUTO_LOG:-"/tmp/guet_drcom.log"}
+AUTO_PID=${AUTO_PID:-"/tmp/guet_drcom.pid"}
+AUTO_INTERVAL=${AUTO_INTERVAL:-60}
 
 # GBK bytes for the text: 注销页
 STATUS_MARKER_GBK=$(printf '\327\242\317\372\322\263')
@@ -54,7 +56,7 @@ usage() {
     auto_status='未启用'
 
     [ -f "$CONFIG_FILE" ] && init_status='已完成'
-    if type crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -Fq '# guet_drcom-auto'; then
+    if auto_is_running; then
         auto_status='已启用'
     fi
 
@@ -66,8 +68,9 @@ GUET Dr.COM 路由器版 (BusyBox ash)
   $SCRIPT_NAME login      注销旧会话并重新登录
   $SCRIPT_NAME logout     注销当前会话
   $SCRIPT_NAME check      检测在线状态，掉线则重连
-  $SCRIPT_NAME auto       每分钟自动检测与重连
-  $SCRIPT_NAME disable    移除自动重连 cron
+  $SCRIPT_NAME auto       后台循环自动检测与重连
+  $SCRIPT_NAME status     查看自动重连状态
+  $SCRIPT_NAME disable    停止自动重连
   $SCRIPT_NAME diag       查看到认证服务器的路由/接口信息
   $SCRIPT_NAME help       显示帮助
 
@@ -77,6 +80,8 @@ GUET Dr.COM 路由器版 (BusyBox ash)
 
 配置文件: $CONFIG_FILE
 日志文件: $AUTO_LOG
+PID 文件: $AUTO_PID
+检测间隔: ${AUTO_INTERVAL} 秒
 EOF_USAGE
 }
 
@@ -447,57 +452,103 @@ check_command() {
     login_command
 }
 
-safe_cron_path() {
+safe_auto_path() {
     case "$1" in
         ''|*[!A-Za-z0-9_./:-]*) return 1 ;;
         *) return 0 ;;
     esac
 }
 
+auto_read_pid() {
+    [ -f "$AUTO_PID" ] || return 1
+    auto_pid=$(sed -n '1p' "$AUTO_PID" 2>/dev/null)
+    case "$auto_pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    return 0
+}
+
+auto_is_running() {
+    auto_read_pid || return 1
+    kill -0 "$auto_pid" 2>/dev/null
+}
+
 auto_command() {
     [ -f "$CONFIG_FILE" ] || fail "找不到 $CONFIG_FILE，请先运行 $SCRIPT_NAME init"
-    require_cmd crontab
 
-    # Keeping paths shell-simple avoids depending on Bash-style %q quoting.
-    safe_cron_path "$SCRIPT_PATH" || fail "脚本路径含空格或特殊字符，请移动到简单路径后再启用 auto: $SCRIPT_PATH"
-    safe_cron_path "$CONFIG_FILE" || fail "配置路径含空格或特殊字符: $CONFIG_FILE"
-    safe_cron_path "$AUTO_LOG" || fail "日志路径含空格或特殊字符: $AUTO_LOG"
+    safe_auto_path "$SCRIPT_PATH" || fail "脚本路径含空格或特殊字符，请移动到简单路径后再启用 auto: $SCRIPT_PATH"
+    safe_auto_path "$CONFIG_FILE" || fail "配置路径含空格或特殊字符: $CONFIG_FILE"
+    safe_auto_path "$AUTO_LOG" || fail "日志路径含空格或特殊字符: $AUTO_LOG"
+    safe_auto_path "$AUTO_PID" || fail "PID 路径含空格或特殊字符: $AUTO_PID"
 
+    case "$AUTO_INTERVAL" in
+        ''|*[!0-9]*) fail "AUTO_INTERVAL 必须是正整数秒数" ;;
+        0) fail "AUTO_INTERVAL 必须大于 0" ;;
+    esac
+
+    if auto_is_running; then
+        info "自动重连已经运行，PID: $auto_pid"
+        printf '日志: %s\n' "$AUTO_LOG"
+        return 0
+    fi
+
+    rm -f "$AUTO_PID"
     umask 077
     : >>"$AUTO_LOG" || fail "无法创建日志文件: $AUTO_LOG"
     chmod 600 "$AUTO_LOG" 2>/dev/null || true
 
-    existing=$(crontab -l 2>/dev/null || true)
-    filtered=$(printf '%s\n' "$existing" | awk '!/# guet_drcom-auto/')
-    cron_line="* * * * * PATH=/usr/bin:/bin:/usr/sbin:/sbin GUET_DRCOM_ENV=$CONFIG_FILE /bin/sh $SCRIPT_PATH check >> $AUTO_LOG 2>&1 # guet_drcom-auto"
+    (
+        trap '' HUP
+        printf '[%s] auto loop started, interval=%ss\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$AUTO_INTERVAL" >>"$AUTO_LOG"
+        while :; do
+            GUET_DRCOM_ENV="$CONFIG_FILE" AUTO_LOG="$AUTO_LOG" /bin/sh "$SCRIPT_PATH" check >>"$AUTO_LOG" 2>&1
+            sleep "$AUTO_INTERVAL"
+        done
+    ) </dev/null >/dev/null 2>&1 &
 
-    {
-        [ -z "$filtered" ] || printf '%s\n' "$filtered"
-        printf '%s\n' "$cron_line"
-    } | crontab - || fail '写入 crontab 失败'
+    auto_pid=$!
+    printf '%s\n' "$auto_pid" >"$AUTO_PID" || {
+        kill "$auto_pid" 2>/dev/null || true
+        fail "无法写入 PID 文件: $AUTO_PID"
+    }
 
-    info '自动重连已启用：每分钟检查一次'
+    sleep 1
+    if ! kill -0 "$auto_pid" 2>/dev/null; then
+        rm -f "$AUTO_PID"
+        fail "自动重连后台进程启动失败，请查看日志: $AUTO_LOG"
+    fi
+
+    info "自动重连已启用：每 $AUTO_INTERVAL 秒检查一次"
+    printf 'PID: %s\n' "$auto_pid"
     printf '日志: %s\n' "$AUTO_LOG"
-    printf '查看: crontab -l\n'
 }
 
-disable_command() {
-    require_cmd crontab
-    existing=$(crontab -l 2>/dev/null || true)
-
-    if ! printf '%s\n' "$existing" | grep -Fq '# guet_drcom-auto'; then
-        warn '自动重连任务尚未启用'
+status_command() {
+    if auto_is_running; then
+        printf '自动重连: 运行中\n'
+        printf 'PID: %s\n' "$auto_pid"
+        printf '检测间隔: %s 秒\n' "$AUTO_INTERVAL"
+        printf '日志: %s\n' "$AUTO_LOG"
         return 0
     fi
 
-    filtered=$(printf '%s\n' "$existing" | awk '!/# guet_drcom-auto/')
-    if [ -n "$filtered" ]; then
-        printf '%s\n' "$filtered" | crontab - || fail '更新 crontab 失败'
-    else
-        printf '' | crontab - || fail '更新 crontab 失败'
+    printf '自动重连: 未运行\n'
+    [ ! -f "$AUTO_PID" ] || printf '检测到无效 PID 文件: %s\n' "$AUTO_PID"
+    return 1
+}
+
+disable_command() {
+    if ! auto_is_running; then
+        rm -f "$AUTO_PID"
+        warn '自动重连尚未运行'
+        return 0
     fi
 
-    info '自动重连任务已关闭，其他 cron 项未修改'
+    pid=$auto_pid
+    kill "$pid" 2>/dev/null || fail "无法停止自动重连进程 PID $pid"
+    rm -f "$AUTO_PID"
+    printf '[%s] auto loop stopped, pid=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$pid" >>"$AUTO_LOG"
+    info "自动重连已关闭，PID: $pid"
 }
 
 diag_command() {
@@ -542,6 +593,10 @@ case ${1:-help} in
     auto)
         assert_no_extra_args "$@"
         auto_command
+        ;;
+    status)
+        assert_no_extra_args "$@"
+        status_command
         ;;
     disable)
         assert_no_extra_args "$@"
