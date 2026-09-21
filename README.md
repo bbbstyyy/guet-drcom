@@ -1,10 +1,10 @@
-# GUET Dr.COM · MiWiFi 路由器版
+# GUET Dr.COM · ZTE 光猫版
 
-桂林电子科技大学（GUET）校园网 Dr.COM 认证脚本，专门用于 **直接运行在小米路由器 / XiaoQiang / BusyBox ash 上**。
+桂林电子科技大学（GUET）校园网 Dr.COM 认证脚本，基于 miwifi 分支适配 **ZTE ONU / 光猫上的老版本 BusyBox ash**。
 
-本分支不需要 Bash，也不依赖 `iconv`。脚本会从路由器自身的路由表中自动识别通往认证服务器的 WAN 接口、IPv4 和 MAC，并支持掉线检测与 cron 自动重连。
+本分支不需要 Bash，也不依赖 `iconv`，并额外避免了部分 ZTE 老 BusyBox 中缺失的 `dirname` 与 `command -v`。脚本会从设备自身的路由表中自动识别通往认证服务器的 WAN 接口、IPv4 和 MAC，并支持掉线检测与 cron 自动重连。
 
-> 已实机验证：Redmi AX3000（RA81）、XiaoQiang 固件、Linux 4.4.60、ARMv7、BusyBox ash 1.25.1、curl 7.79.1。
+> ZTE 兼容目标：BusyBox ash 1.17.x 一类老固件环境；已针对缺失 `dirname`、缺失 `command` builtin 的情况做兼容。
 
 ---
 
@@ -72,17 +72,17 @@ done
 
 ## 安装
 
-建议安装到路由器的**持久化目录**。已验证的小米路由器可使用：
+建议安装到 ZTE 光猫的**持久化 JFFS2 目录**。如果 `mount` 中能看到 `/usercfg` 为 `jffs2 (rw,...)`，推荐使用：
 
 ```text
-/data/guet-drcom
+/usercfg/guet-drcom
 ```
 
 安装：
 
 ```sh
-mkdir -p /data/guet-drcom
-cd /data/guet-drcom
+mkdir -p /usercfg/guet-drcom
+cd /usercfg/guet-drcom
 
 curl -fL \
   https://raw.githubusercontent.com/bbbstyyy/guet-drcom/miwifi/guet_drcom.sh \
@@ -92,7 +92,7 @@ chmod 700 guet_drcom.sh
 ./guet_drcom.sh help
 ```
 
-> 不建议长期放在 `/tmp`，因为路由器重启后该目录中的文件通常会消失。
+> 不建议长期放在 `/tmp`、`/var` 等 tmpfs 目录，因为重启后文件会消失。
 
 ---
 
@@ -101,7 +101,7 @@ chmod 700 guet_drcom.sh
 ### 1. 初始化
 
 ```sh
-cd /data/guet-drcom
+cd /usercfg/guet-drcom
 ./guet_drcom.sh init
 ```
 
@@ -124,7 +124,7 @@ cd /data/guet-drcom
 初始化后生成：
 
 ```text
-/data/guet-drcom/.env
+/usercfg/guet-drcom/.env
 ```
 
 配置文件权限会设置为 `600`。
@@ -221,7 +221,7 @@ crontab -l | grep guet_drcom
 查看日志：
 
 ```sh
-tail -f /data/guet-drcom/guet_drcom.log
+tail -f /usercfg/guet-drcom/guet_drcom.log
 ```
 
 ### 6. 关闭自动重连
@@ -251,7 +251,7 @@ tail -f /data/guet-drcom/guet_drcom.log
 
 ## 文件
 
-本分支只保留路由器运行所需内容：
+本分支只保留设备运行所需内容：
 
 ```text
 .
@@ -302,7 +302,7 @@ DRY_RUN=1 ./guet_drcom.sh login
 在安装目录重新下载即可：
 
 ```sh
-cd /data/guet-drcom
+cd /usercfg/guet-drcom
 
 curl -fL \
   https://raw.githubusercontent.com/bbbstyyy/guet-drcom/miwifi/guet_drcom.sh \
@@ -327,7 +327,7 @@ chmod 700 guet_drcom.sh
 
 ```sh
 cd /data
-rm -rf /data/guet-drcom
+rm -rf /usercfg/guet-drcom
 ```
 
 ---
@@ -372,3 +372,24 @@ rm -rf /data/guet-drcom
 ---
 
 **原作者：bbbstyyy**
+
+
+---
+
+## ZTE BusyBox 兼容说明
+
+部分 ZTE ONU 固件使用较老的 BusyBox。已确认可能存在以下差异：
+
+- `/bin/sh -> /bin/busybox`
+- 支持 `ash`
+- 缺少 `dirname` applet
+- `command -v` 不可用，但 `type` 可用
+
+因此本分支：
+
+- 使用 shell 参数展开计算脚本目录，不依赖 `dirname`
+- 使用 `type` 检测命令，不依赖 `command -v`
+- 默认建议将脚本和 `.env` 放在 `/usercfg/guet-drcom`
+- 建议将自动重连日志放在 `/tmp/guet_drcom.log`，避免频繁写 Flash
+
+在 ZTE 上启用自动重连前，请先确认 `crontab` / `crond` 是否存在，以及 cron 配置是否会跨重启保留。
