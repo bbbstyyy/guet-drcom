@@ -1,12 +1,34 @@
 # GUET Dr.COM 校园网认证工具
 
-桂林电子科技大学（GUET）校园网 Dr.COM 认证辅助脚本，支持自动登录、掉线检测与自动重连，覆盖 macOS/Linux 与 Windows。
+桂林电子科技大学（GUET）校园网 Dr.COM 认证辅助脚本，支持自动登录、掉线检测与自动重连。
 
-- **`guet_drcom.sh`** — macOS / Linux（bash），用 crontab 保活。
-- **`guet_drcom.ps1`** — Windows（PowerShell），用「计划任务」保活。
-- **`guet_drcom.bat`** — Windows 启动器：双击出菜单，免敲参数。
+**`main` 是默认分支**：适合脚本运行在电脑上，并由这台电脑自身作为校园网认证终端的场景。
 
-两个版本认证流程一致，按平台选其一即可。
+- **`guet_drcom.sh`** — macOS / Linux（Bash），使用 crontab 保活。
+- **`guet_drcom.ps1`** — Windows（PowerShell），使用计划任务保活。
+- **`guet_drcom.bat`** — Windows 启动器，双击即可使用菜单。
+
+macOS/Linux 与 Windows 版本采用相同的 Dr.COM 认证流程，按平台选择即可。
+
+## 选择分支
+
+仓库目前维护三个使用场景不同的分支：
+
+| 分支 | 脚本运行位置 | 认证使用的网络信息 | 适用场景 |
+| --- | --- | --- | --- |
+| **[`main`](https://github.com/bbbstyyy/guet-drcom/tree/main)** | **电脑** | **自动读取电脑网卡** | **电脑直接接入校园网，由电脑自身认证** |
+| [`router`](https://github.com/bbbstyyy/guet-drcom/tree/router) | 电脑 | 手动填写路由器 WAN IPv4 / MAC | 电脑在路由器 LAN 后面，由电脑替路由器 WAN 身份完成认证 |
+| [`miwifi`](https://github.com/bbbstyyy/guet-drcom/tree/miwifi) | 小米路由器 | 自动读取路由器 WAN 接口 / IPv4 / MAC | 脚本直接运行在 MiWiFi / XiaoQiang / BusyBox ash 路由器上 |
+
+简单判断：
+
+```text
+电脑直接接校园网              -> main
+校园网 -> 路由器 -> 电脑      -> router（脚本仍跑在电脑上）
+校园网 -> 小米路由器          -> miwifi（脚本直接跑在路由器上）
+```
+
+> 如果中间有路由器，不要直接照搬 `main`：认证门户看到的可能是路由器 WAN 的 IP/MAC。脚本仍运行在电脑上时使用 `router`；若希望小米路由器自己完成认证和保活，使用 `miwifi`。
 
 ---
 
