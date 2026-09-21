@@ -85,7 +85,7 @@ mkdir -p /usercfg/guet-drcom
 cd /usercfg/guet-drcom
 
 curl -fL \
-  https://raw.githubusercontent.com/bbbstyyy/guet-drcom/miwifi/guet_drcom.sh \
+  https://raw.githubusercontent.com/bbbstyyy/guet-drcom/zte/guet_drcom.sh \
   -o guet_drcom.sh
 
 chmod 700 guet_drcom.sh
@@ -280,7 +280,7 @@ tail -f /usercfg/guet-drcom/guet_drcom.log
 | `STATUS_URL` | 在线状态页面 |
 | `LOGIN_URL` | 登录接口 |
 | `LOGOUT_URL` | 注销接口 |
-| `LOGOUT_DELAY` | 注销后到登录前的等待时间，默认 1 秒 |
+| `LOGOUT_DELAY` | 注销后到登录前的等待时间，默认 3 秒 |
 | `DRY_RUN` | 设为 `1` 时只检测网络信息，不发送登录 / 注销请求 |
 | `AUTO_LOG` | 自动重连日志路径 |
 | `GUET_DRCOM_ENV` | 自定义配置文件路径 |
@@ -305,7 +305,7 @@ DRY_RUN=1 ./guet_drcom.sh login
 cd /usercfg/guet-drcom
 
 curl -fL \
-  https://raw.githubusercontent.com/bbbstyyy/guet-drcom/miwifi/guet_drcom.sh \
+  https://raw.githubusercontent.com/bbbstyyy/guet-drcom/zte/guet_drcom.sh \
   -o guet_drcom.sh
 
 chmod 700 guet_drcom.sh
