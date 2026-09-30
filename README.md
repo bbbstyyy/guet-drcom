@@ -65,6 +65,8 @@ macOS/Linux 与 Windows 版本采用相同的 Dr.COM 认证流程，按平台选
 ./guet_drcom.sh help      # 查看帮助与状态
 ```
 
+自动检测仍按每分钟调度，但 `check` 带互斥保护：如果上一轮检查/重连尚未结束，本轮会直接跳过，不会并发执行。
+
 ### Windows
 
 **方式一（推荐）**：双击 `guet_drcom.bat`，按菜单数字选择。
@@ -118,6 +120,8 @@ powershell -ExecutionPolicy Bypass -File .\guet_drcom.ps1 auto
 以下变量可覆盖默认值，两平台一致：
 
 `SERVER_IP`、`STATUS_URL`、`LOGIN_URL`、`LOGOUT_URL`、`LOGOUT_DELAY`、`DRY_RUN`、`AUTO_LOG`、`GUET_DRCOM_ENV`（配置文件路径），以及 `INTERFACE`/`CLIENT_IP`/`CLIENT_IPV6`/`CLIENT_MAC`（手动指定网络信息）。
+
+`LOGOUT_DELAY` 默认值为 **16 秒**。该等待发生在 logout 请求之后、login 请求之前；自动检测频率仍为每分钟一次，并由互斥机制避免任务重叠。
 
 ```powershell
 # 示例：只探测网络、不真正发请求
