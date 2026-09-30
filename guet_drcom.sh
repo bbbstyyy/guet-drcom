@@ -54,7 +54,7 @@ GUET Dr.COM 路由器版 (BusyBox ash)
   $(basename "$0") login      注销旧会话并重新登录
   $(basename "$0") logout     注销当前会话
   $(basename "$0") check      检测在线状态，掉线则重连
-  $(basename "$0") auto       每分钟自动检测与重连
+  $(basename "$0") auto       每2分钟自动检测与重连
   $(basename "$0") disable    移除自动重连 cron
   $(basename "$0") diag       查看到认证服务器的路由/接口信息
   $(basename "$0") help       显示帮助
@@ -457,14 +457,14 @@ auto_command() {
 
     existing=$(crontab -l 2>/dev/null || true)
     filtered=$(printf '%s\n' "$existing" | awk '!/# guet_drcom-auto/')
-    cron_line="* * * * * PATH=/usr/bin:/bin:/usr/sbin:/sbin GUET_DRCOM_ENV=$CONFIG_FILE /bin/sh $SCRIPT_PATH check >> $AUTO_LOG 2>&1 # guet_drcom-auto"
+    cron_line="*/2 * * * * PATH=/usr/bin:/bin:/usr/sbin:/sbin GUET_DRCOM_ENV=$CONFIG_FILE /bin/sh $SCRIPT_PATH check >> $AUTO_LOG 2>&1 # guet_drcom-auto"
 
     {
         [ -z "$filtered" ] || printf '%s\n' "$filtered"
         printf '%s\n' "$cron_line"
     } | crontab - || fail '写入 crontab 失败'
 
-    info '自动重连已启用：每分钟检查一次'
+    info '自动重连已启用：每2分钟检查一次'
     printf '日志: %s\n' "$AUTO_LOG"
     printf '查看: crontab -l\n'
 }
