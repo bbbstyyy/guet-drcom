@@ -61,12 +61,21 @@ $ServerIP    = if ($env:SERVER_IP)    { $env:SERVER_IP }    else { '10.0.1.5' }
 $StatusUrl   = if ($env:STATUS_URL)   { $env:STATUS_URL }   else { "http://$ServerIP/" }
 $LogoutUrl   = if ($env:LOGOUT_URL)   { $env:LOGOUT_URL }   else { "http://${ServerIP}:801/eportal/portal/logout" }
 $LoginUrl    = if ($env:LOGIN_URL)    { $env:LOGIN_URL }    else { "http://$ServerIP/drcom/login" }
-$LogoutDelay = if ($env:LOGOUT_DELAY) { [int]$env:LOGOUT_DELAY } else { 1 }
+$LogoutDelay = if ($env:LOGOUT_DELAY) { [int]$env:LOGOUT_DELAY } else { 16 }
 $DryRun      = if ($env:DRY_RUN)      { $env:DRY_RUN }      else { '0' }
 $AutoLog     = if ($env:AUTO_LOG)     { $env:AUTO_LOG }     else { Join-Path $ScriptDir 'guet_drcom.log' }
 
 $TaskName = 'GUET_DrCOM_AutoReconnect'
 $HiddenLauncher = Join-Path $ScriptDir 'guet_drcom_hidden.vbs'
+
+$sha1 = [System.Security.Cryptography.SHA1]::Create()
+try {
+    $pathBytes = [System.Text.Encoding]::UTF8.GetBytes($ScriptPath.ToLowerInvariant())
+    $pathHash = -join ($sha1.ComputeHash($pathBytes) | ForEach-Object { $_.ToString('x2') })
+} finally {
+    $sha1.Dispose()
+}
+$CheckMutexName = "Local\GUET_DrCOM_Check_$pathHash"
 
 $CarrierNames    = @('校园网', '中国移动', '中国联通', '中国电信', '中国广电')
 $CarrierSuffixes = @('', '@cmcc', '@unicom', '@telecom', '@glgd')
@@ -581,38 +590,62 @@ function Invoke-Login {
 }
 
 function Invoke-Check {
-    # 注册代码页编码提供程序（PowerShell 7 / .NET Core 需要，才能使用 GBK）
-    try {
-        [System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance)
-    } catch { }
-    $gbk = $null
-    try { $gbk = [System.Text.Encoding]::GetEncoding(936) } catch { }
+    $mutex = [System.Threading.Mutex]::new($false, $CheckMutexName)
+    $lockAcquired = $false
 
-    $online = $false
     try {
-        Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue
-        # UseProxy=$false：状态检测同样须直连，避免代理返回非门户页面导致误判
-        $handler = New-Object System.Net.Http.HttpClientHandler
-        $handler.UseProxy = $false
-        $client = New-Object System.Net.Http.HttpClient($handler)
-        $client.Timeout = [TimeSpan]::FromSeconds(8)
         try {
-            $bytes = $client.GetByteArrayAsync($StatusUrl).GetAwaiter().GetResult()
-        } finally {
-            $client.Dispose()
-            $handler.Dispose()
+            $lockAcquired = $mutex.WaitOne(0)
+        } catch [System.Threading.AbandonedMutexException] {
+            # 上一次进程异常退出后，Windows 会把互斥体标记为 abandoned；
+            # 当前进程已获得所有权，可以安全继续。
+            $lockAcquired = $true
         }
-        $page = if ($gbk) { $gbk.GetString($bytes) } else { [System.Text.Encoding]::UTF8.GetString($bytes) }
-        if ($page -like '*注销页*') { $online = $true }
-    } catch {
+
+        if (-not $lockAcquired) {
+            $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+            Write-Host "[$timestamp] 上一次 check 仍在运行，跳过本次。"
+            return
+        }
+
+        # 注册代码页编码提供程序（PowerShell 7 / .NET Core 需要，才能使用 GBK）
+        try {
+            [System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance)
+        } catch { }
+        $gbk = $null
+        try { $gbk = [System.Text.Encoding]::GetEncoding(936) } catch { }
+
         $online = $false
+        try {
+            Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue
+            # UseProxy=$false：状态检测同样须直连，避免代理返回非门户页面导致误判
+            $handler = New-Object System.Net.Http.HttpClientHandler
+            $handler.UseProxy = $false
+            $client = New-Object System.Net.Http.HttpClient($handler)
+            $client.Timeout = [TimeSpan]::FromSeconds(8)
+            try {
+                $bytes = $client.GetByteArrayAsync($StatusUrl).GetAwaiter().GetResult()
+            } finally {
+                $client.Dispose()
+                $handler.Dispose()
+            }
+            $page = if ($gbk) { $gbk.GetString($bytes) } else { [System.Text.Encoding]::UTF8.GetString($bytes) }
+            if ($page -like '*注销页*') { $online = $true }
+        } catch {
+            $online = $false
+        }
+
+        if ($online) { return }
+
+        $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        Write-Host "[$timestamp] 未检测到`"注销页`"，开始重新登录。"
+        Invoke-Login
+    } finally {
+        if ($lockAcquired) {
+            try { $mutex.ReleaseMutex() } catch { }
+        }
+        $mutex.Dispose()
     }
-
-    if ($online) { return }
-
-    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    Write-Host "[$timestamp] 未检测到`"注销页`"，开始重新登录。"
-    Invoke-Login
 }
 
 function Invoke-Auto {
