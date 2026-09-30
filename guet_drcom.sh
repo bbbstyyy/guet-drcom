@@ -13,7 +13,7 @@ LOGIN_URL=${LOGIN_URL:-http://${SERVER_IP}/drcom/login}
 LOGOUT_DELAY=${LOGOUT_DELAY:-16}
 DRY_RUN=${DRY_RUN:-0}
 AUTO_LOG=${AUTO_LOG:-"$SCRIPT_DIR/guet_drcom.log"}
-CHECK_LOCK_DIR="$SCRIPT_DIR/.guet_drcom_check.lock"
+CHECK_LOCK_DIR="${TMPDIR:-/tmp}/guet_drcom_check_${UID}.lock"
 
 CARRIER_NAMES=("校园网" "中国移动" "中国联通" "中国电信" "中国广电")
 CARRIER_SUFFIXES=("" "@cmcc" "@unicom" "@telecom" "@glgd")
@@ -404,16 +404,8 @@ release_check_lock() {
 acquire_check_lock() {
     if mkdir "$CHECK_LOCK_DIR" 2>/dev/null; then
         trap release_check_lock EXIT
+        trap 'release_check_lock; exit 130' HUP INT TERM
         return 0
-    fi
-
-    # 正常一次 check 应在一分钟内完成。超过 5 分钟的锁视为异常退出遗留。
-    if find "$CHECK_LOCK_DIR" -prune -mmin +5 -print 2>/dev/null | grep -q .; then
-        rm -rf -- "$CHECK_LOCK_DIR" 2>/dev/null || true
-        if mkdir "$CHECK_LOCK_DIR" 2>/dev/null; then
-            trap release_check_lock EXIT
-            return 0
-        fi
     fi
 
     printf '[%s] 上一次 check 仍在运行，跳过本次。\n' "$(date '+%Y-%m-%d %H:%M:%S')"
