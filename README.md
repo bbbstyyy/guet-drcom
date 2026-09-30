@@ -210,7 +210,7 @@ echo $?
 # guet_drcom-auto
 ```
 
-默认每分钟执行一次在线检测。
+默认每2分钟执行一次在线检测。
 
 查看任务：
 
@@ -242,7 +242,7 @@ tail -f /data/guet-drcom/guet_drcom.log
 | `login` | 自动获取 WAN 网络信息，注销旧会话后重新登录 |
 | `logout` | 注销当前会话 |
 | `check` | 检查在线状态，掉线时自动登录 |
-| `auto` | 添加每分钟执行一次的自动检测 / 重连 cron |
+| `auto` | 添加每2分钟执行一次的自动检测 / 重连 cron |
 | `disable` | 删除本脚本添加的自动重连 cron |
 | `diag` | 显示到认证服务器的路由、默认路由和 IPv4 地址 |
 | `help` | 显示帮助与当前状态 |
