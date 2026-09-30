@@ -13,7 +13,7 @@ LOGIN_URL=${LOGIN_URL:-http://${SERVER_IP}/drcom/login}
 LOGOUT_DELAY=${LOGOUT_DELAY:-16}
 DRY_RUN=${DRY_RUN:-0}
 AUTO_LOG=${AUTO_LOG:-"$SCRIPT_DIR/guet_drcom.log"}
-CHECK_LOCK_FILE="$SCRIPT_DIR/.guet_drcom_check.lock"
+CHECK_LOCK_DIR="$SCRIPT_DIR/.guet_drcom_check.lock"
 
 CARRIER_NAMES=("校园网" "中国移动" "中国联通" "中国电信" "中国广电")
 CARRIER_SUFFIXES=("" "@cmcc" "@unicom" "@telecom" "@glgd")
@@ -397,49 +397,26 @@ login_command() {
     send_login
 }
 
-try_create_check_lock() {
-    (set -o noclobber; printf '%s\n' "$" >"$CHECK_LOCK_FILE") 2>/dev/null
-}
-
 release_check_lock() {
-    local owner_pid=''
-
-    if [[ -r $CHECK_LOCK_FILE ]]; then
-        read -r owner_pid <"$CHECK_LOCK_FILE" || true
-    fi
-    if [[ $owner_pid == "$" ]]; then
-        rm -f -- "$CHECK_LOCK_FILE"
-    fi
+    rmdir "$CHECK_LOCK_DIR" 2>/dev/null || true
 }
 
 acquire_check_lock() {
-    local owner_pid=''
-
-    if try_create_check_lock; then
+    if mkdir "$CHECK_LOCK_DIR" 2>/dev/null; then
         trap release_check_lock EXIT
         return 0
     fi
 
-    if [[ -r $CHECK_LOCK_FILE ]]; then
-        read -r owner_pid <"$CHECK_LOCK_FILE" || true
-    fi
-
-    if [[ $owner_pid =~ ^[0-9]+$ ]] && kill -0 "$owner_pid" 2>/dev/null; then
-        printf '[%s] 上一次 check 仍在运行（PID %s），跳过本次。\n' \
-            "$(date '+%Y-%m-%d %H:%M:%S')" "$owner_pid"
-        return 1
-    fi
-
-    # 上次进程已退出时清理陈旧锁；竞争情况下只允许一个进程重新获得锁。
-    if [[ $owner_pid =~ ^[0-9]+$ ]]; then
-        rm -f -- "$CHECK_LOCK_FILE"
-        if try_create_check_lock; then
+    # 正常一次 check 应在一分钟内完成。超过 5 分钟的锁视为异常退出遗留。
+    if find "$CHECK_LOCK_DIR" -prune -mmin +5 -print 2>/dev/null | grep -q .; then
+        rm -rf -- "$CHECK_LOCK_DIR" 2>/dev/null || true
+        if mkdir "$CHECK_LOCK_DIR" 2>/dev/null; then
             trap release_check_lock EXIT
             return 0
         fi
     fi
 
-    printf '[%s] check 锁已被占用，跳过本次。\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    printf '[%s] 上一次 check 仍在运行，跳过本次。\n' "$(date '+%Y-%m-%d %H:%M:%S')"
     return 1
 }
 
